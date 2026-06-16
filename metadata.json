@@ -1,0 +1,6 @@
+{
+  "name": "JARVIS AI",
+  "description": "An advanced, proactive AI companion, programming tutor, and voice assistant with long-term memory support.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -1,0 +1,1928 @@
+package com.example
+
+import android.app.Activity
+import android.app.NotificationManager
+import com.example.service.JarvisNotificationListenerService
+import com.example.service.JarvisCommandProcessor
+import android.content.Context
+import android.content.Intent
+import android.hardware.camera2.CameraManager
+import android.media.AudioManager
+import android.os.Build
+import android.os.Bundle
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.provider.MediaStore
+import android.provider.Settings
+import android.speech.RecognizerIntent
+import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
+import android.util.Log
+import android.widget.Toast
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.viewModels
+import androidx.compose.animation.*
+import androidx.compose.animation.core.*
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.*
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.data.database.ConversationMessage
+import com.example.data.database.UserMemory
+import com.example.ui.theme.*
+import com.example.ui.viewmodel.JarvisViewModel
+import java.util.Locale
+
+class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
+
+    private val viewModel: JarvisViewModel by viewModels()
+    private var tts: TextToSpeech? = null
+    private var isTtsInitialized = false
+    private var speechRecognizer: android.speech.SpeechRecognizer? = null
+
+    private val requestPermissionsLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { permissions ->
+        val recordGranted = permissions[android.Manifest.permission.RECORD_AUDIO] ?: false
+        val originalState = androidx.core.content.ContextCompat.checkSelfPermission(this, android.Manifest.permission.RECORD_AUDIO) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        if (recordGranted || originalState) {
+            viewModel.addLog("Telemetry Check: Audio Capture Permission ACTIVE")
+            initializeSpeechRecognizer()
+        } else {
+            viewModel.addLog("Telemetry Warning: Audio Capture Permission DENIED")
+        }
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
+
+        // Initialize Native speech synthesis
+        tts = TextToSpeech(this, this)
+
+        // Request Audio & Notification Permissions
+        val permissionsToRequest = mutableListOf<String>()
+        if (androidx.core.content.ContextCompat.checkSelfPermission(this, android.Manifest.permission.RECORD_AUDIO) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            permissionsToRequest.add(android.Manifest.permission.RECORD_AUDIO)
+        } else {
+            initializeSpeechRecognizer()
+        }
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+            if (androidx.core.content.ContextCompat.checkSelfPermission(this, android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                permissionsToRequest.add(android.Manifest.permission.POST_NOTIFICATIONS)
+            }
+        }
+        if (permissionsToRequest.isNotEmpty()) {
+            requestPermissionsLauncher.launch(permissionsToRequest.toTypedArray())
+        }
+
+        setContent {
+            MyApplicationTheme {
+                // Main screen layout
+                JarvisDashboardScreen(
+                    viewModel = viewModel,
+                    onStartSpeechRecognition = { startSpeechToText() }
+                )
+            }
+        }
+    }
+
+    // TTS initialization
+    override fun onInit(status: Int) {
+        if (status == TextToSpeech.SUCCESS) {
+            val result = tts?.setLanguage(Locale.US)
+            if (result == TextToSpeech.LANG_MISSING_DATA || result == TextToSpeech.LANG_NOT_SUPPORTED) {
+                Log.e("JARVIS", "TTS Language not supported or missing data")
+            } else {
+                isTtsInitialized = true
+                Log.d("JARVIS", "TTS Engine successfully initialized in English.")
+                viewModel.addLog("TTS Speech Synthesis Online")
+                
+                tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                    override fun onStart(utteranceId: String?) {
+                        Log.d("JARVIS", "TTS started speaking: $utteranceId")
+                        viewModel.setSpeaking(true)
+                    }
+
+                    override fun onDone(utteranceId: String?) {
+                        Log.d("JARVIS", "TTS finished speaking: $utteranceId")
+                        viewModel.setSpeaking(false)
+                        if (viewModel.handsFreeEnabled.value) {
+                            runOnUiThread {
+                                startSpeechToText()
+                            }
+                        }
+                    }
+
+                    override fun onError(utteranceId: String?) {
+                        Log.e("JARVIS", "TTS error: $utteranceId")
+                        viewModel.setSpeaking(false)
+                    }
+                })
+            }
+        } else {
+            Log.e("JARVIS", "TTS Initialization failed")
+            viewModel.addLog("TTS System Failure code: $status")
+        }
+    }
+
+    // Helper function to speak aloud
+    fun speakAloud(text: String) {
+        if (isTtsInitialized) {
+            // Cancel active speech recognizer listening so it doesn't record own spoken voice
+            try {
+                speechRecognizer?.cancel()
+            } catch (e: Exception) {}
+
+            // Dynamically load voice settings pitch and rate modulation from database (memoriesState)
+            val memories = viewModel.memoriesState.value
+            val pitchStr = memories.firstOrNull { it.key == "voice_pitch" }?.value
+            val rateStr = memories.firstOrNull { it.key == "voice_rate" }?.value
+
+            val pitch = pitchStr?.toFloatOrNull() ?: 0.85f // butler deep pitch default
+            val rate = rateStr?.toFloatOrNull() ?: 1.05f   // butler speed default
+
+            try {
+                tts?.setPitch(pitch)
+                tts?.setSpeechRate(rate)
+            } catch (e: Exception) {
+                Log.e("JARVIS", "Failed to modulate acoustic voice parameters", e)
+            }
+
+            tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "jarvis_session")
+        } else {
+            Toast.makeText(this, "Speech synthesis not ready yet.", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    // Intercept global touches to terminate speech output and immediately listen
+    fun stopSpeakingAndListen() {
+        runOnUiThread {
+            try {
+                if (tts?.isSpeaking == true) {
+                    tts?.stop()
+                    viewModel.setSpeaking(false)
+                    viewModel.addLog("Telemetry: Active Vocal Output interrupted by gesture.")
+                }
+                startSpeechToText()
+            } catch (e: Exception) {
+                Log.e("JARVIS", "Failed to run stopSpeakingAndListen interrupt", e)
+            }
+        }
+    }
+
+    private fun initializeSpeechRecognizer() {
+        runOnUiThread {
+            try {
+                if (android.speech.SpeechRecognizer.isRecognitionAvailable(this)) {
+                    speechRecognizer = android.speech.SpeechRecognizer.createSpeechRecognizer(this).apply {
+                        setRecognitionListener(object : android.speech.RecognitionListener {
+                            override fun onReadyForSpeech(params: Bundle?) {
+                                Log.d("JARVIS", "SpeechRecognizer Ready")
+                                viewModel.addLog("Listening Core: Dynamic Wake-Word Array ACTIVE")
+                            }
+
+                            override fun onBeginningOfSpeech() {
+                                Log.d("JARVIS", "SpeechRecognizer Beginning of speech")
+                                // User began talking - instantly terminate active speech synthetic registers
+                                if (tts?.isSpeaking == true) {
+                                    tts?.stop()
+                                    viewModel.setSpeaking(false)
+                                    viewModel.addLog("Vocal Override: Talk-back terminated.")
+                                }
+                            }
+
+                            override fun onRmsChanged(rmsdB: Float) {}
+
+                            override fun onBufferReceived(buffer: ByteArray?) {}
+
+                            override fun onEndOfSpeech() {
+                                Log.d("JARVIS", "SpeechRecognizer End of speech")
+                            }
+
+                            override fun onError(error: Int) {
+                                val message = when (error) {
+                                    android.speech.SpeechRecognizer.ERROR_AUDIO -> "Audio recording error"
+                                    android.speech.SpeechRecognizer.ERROR_CLIENT -> "Client side error"
+                                    android.speech.SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "Insufficient permissions"
+                                    android.speech.SpeechRecognizer.ERROR_NETWORK -> "Network error"
+                                    android.speech.SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "Network timeout"
+                                    android.speech.SpeechRecognizer.ERROR_NO_MATCH -> "No voice match"
+                                    android.speech.SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "Listen Core Busy"
+                                    android.speech.SpeechRecognizer.ERROR_SERVER -> "Server error"
+                                    android.speech.SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "Speech timeout"
+                                    else -> "Unknown error"
+                                }
+                                Log.e("JARVIS", "SpeechRecognizer error: $message (code: $error)")
+
+                                // Automatically destroy and recreate on busy or client locking to avoid mic bugs
+                                if (error == android.speech.SpeechRecognizer.ERROR_RECOGNIZER_BUSY || error == android.speech.SpeechRecognizer.ERROR_CLIENT) {
+                                    Log.w("JARVIS", "SpeechRecognizer busy. Re-initializing voice subsystem.")
+                                    try {
+                                        speechRecognizer?.destroy()
+                                        speechRecognizer = null
+                                    } catch (e: Exception) {}
+                                    initializeSpeechRecognizer()
+                                }
+                                
+                                // Auto-restart in hands-free wake-word mode when mic times out
+                                if (viewModel.handsFreeEnabled.value && !viewModel.isSpeaking.value && !viewModel.isThinking.value) {
+                                    restartListeningIfHandsFree()
+                                }
+                            }
+
+                            override fun onResults(results: Bundle?) {
+                                val matches = results?.getStringArrayList(android.speech.SpeechRecognizer.RESULTS_RECOGNITION)
+                                val spokenText = matches?.firstOrNull() ?: ""
+                                if (spokenText.isNotBlank()) {
+                                    handleSpokenText(spokenText)
+                                } else {
+                                    restartListeningIfHandsFree()
+                                }
+                            }
+
+                            override fun onPartialResults(partialResults: Bundle?) {}
+
+                            override fun onEvent(eventType: Int, params: Bundle?) {}
+                        })
+                    }
+                    viewModel.addLog("Satellite Comms array: Local SpeechRecognizer Initialized")
+                } else {
+                    viewModel.addLog("Error: Native SpeechRecognizer not available on this device configuration")
+                }
+            } catch (e: Exception) {
+                Log.e("JARVIS", "Failed to init SpeechRecognizer", e)
+                viewModel.addLog("Error Initializing SpeechRecognizer: ${e.localizedMessage}")
+            }
+        }
+    }
+
+    private fun handleSpokenText(spokenText: String) {
+        val lowerText = spokenText.lowercase().trim()
+        val wakeWord1 = "hey jarvis"
+        val wakeWord2 = "jarvis"
+        
+        val isWakeWordDetected = lowerText.contains(wakeWord1) || lowerText.contains(wakeWord2)
+        val searchForCommand = viewModel.handsFreeEnabled.value
+        
+        var commandText = spokenText
+        if (searchForCommand) {
+            if (isWakeWordDetected) {
+                viewModel.addLog("Wake-Word Detected! Processing Array Active.")
+                if (lowerText.startsWith(wakeWord1)) {
+                    commandText = spokenText.substring(wakeWord1.length).trim().removePrefix(",").trim()
+                } else if (lowerText.startsWith(wakeWord2)) {
+                    commandText = spokenText.substring(wakeWord2.length).trim().removePrefix(",").trim()
+                }
+                
+                if (commandText.isBlank()) {
+                    val activeName = viewModel.memoriesState.value.firstOrNull { 
+                        it.key.lowercase().contains("user name") || it.key.lowercase() == "user_name"
+                    }?.value ?: "Ranjan"
+                    speakAloud("At your service, sir. What can I do for you, $activeName?")
+                    viewModel.addLog("JARVIS: Ready, $activeName.")
+                    restartListeningIfHandsFree()
+                    return
+                }
+            } else {
+                Log.d("JARVIS", "Ignoring stream: Wake-word absent from: \"$spokenText\"")
+                restartListeningIfHandsFree()
+                return
+            }
+        }
+
+        viewModel.addLog("Command decrypted: \"$commandText\"")
+        val cleaned = commandText.lowercase().trim().removeSuffix(".").removeSuffix("?").trim()
+
+        // 1. Dynamic User Name Learning & Setup
+        val nameRegex = Regex("(?:call me|my name is|i am)\\s+([a-zA-Z0-9 ]+)")
+        val nameMatch = nameRegex.find(cleaned)
+        if (nameMatch != null) {
+            val chosenName = nameMatch.groupValues[1].trim()
+            if (chosenName.isNotEmpty() && !chosenName.contains("protocol") && !chosenName.contains("command")) {
+                viewModel.updateUserName(chosenName)
+                speakAloud("Very good, sir. Saving identity parameters. I shall address you as $chosenName from now on.")
+                viewModel.sendMessage("Command: User requested identity recognition change to $chosenName.", isVoice = true)
+                restartListeningIfHandsFree()
+                return
+            }
+        }
+
+        // 2. Specialized Vocal Request Command Processing
+        val processedReg = JarvisCommandProcessor.parseRegistration(commandText)
+        if (processedReg != null) {
+            if (processedReg.type == "protocol") {
+                val protocolName = processedReg.name.uppercase(java.util.Locale.US)
+                viewModel.updateCustomProtocol(protocolName, processedReg.action)
+                speakAloud("Security matrix updated. I have registered $protocolName to trigger system automation: ${processedReg.action}.")
+                viewModel.sendMessage("Command: Added voice-configured protocol $protocolName mapping to automation action ${processedReg.action}.", isVoice = true)
+            } else {
+                viewModel.updateCustomShortcut(processedReg.name, processedReg.action)
+                speakAloud("Vocal automation saved. Direct command ${processedReg.name} is now bound to system action ${processedReg.action}.")
+                viewModel.sendMessage("Command: Saved custom prompt shortcut trigger '${processedReg.name}' mapping to '${processedReg.action}'.", isVoice = true)
+            }
+            restartListeningIfHandsFree()
+            return
+        }
+
+        // 3. Acoustic Vocal Resonance Settings & Profiles (Actor/Singer voices)
+        if (cleaned.contains("change voice to") || cleaned.contains("voice profile")) {
+            when {
+                cleaned.contains("butler") || cleaned.contains("jarvis") -> {
+                    viewModel.updateVoiceSettings("JARVIS Butler", 0.85f, 1.05f)
+                    speakAloud("Engaging default British-butler acoustic register matrices, sir. Standard diagnostics active.")
+                    viewModel.sendMessage("System: Switched vocal resonators back to default JARVIS British-butler scheme.", isVoice = true)
+                    restartListeningIfHandsFree()
+                    return
+                }
+                cleaned.contains("actress") || cleaned.contains("friday") || cleaned.contains("grace") -> {
+                    viewModel.updateVoiceSettings("FRIDAY Femme", 1.25f, 1.15f)
+                    speakAloud("Symphonic vocal synthesis complete. Friday conversational matrix active and ready.")
+                    viewModel.sendMessage("System: Engaged FRIDAY vocal synthesis register.", isVoice = true)
+                    restartListeningIfHandsFree()
+                    return
+                }
+                cleaned.contains("singer") || cleaned.contains("actor") || cleaned.contains("deep") -> {
+                    viewModel.updateVoiceSettings("Singer", 0.70f, 0.95f)
+                    speakAloud("Deep cinematic frequency resonator is now humming, sir. Audio arrays tuned.")
+                    viewModel.sendMessage("System: Calibrated deeper baritone singer sound pitch.", isVoice = true)
+                    restartListeningIfHandsFree()
+                    return
+                }
+            }
+        }
+
+        // 5. Local Clock Chronicles offline-safeguard
+        if (cleaned == "tell me time" || cleaned == "what's the time" || cleaned == "what is the time" || cleaned == "what time is it") {
+            val timeStr = java.text.SimpleDateFormat("hh:mm a", java.util.Locale.US).format(java.util.Date())
+            speakAloud("It is exactly $timeStr, Ranjan.")
+            viewModel.sendMessage("Tell me the current local time.", isVoice = true)
+            restartListeningIfHandsFree()
+            return
+        }
+        if (cleaned == "tell me date" || cleaned == "what's the date" || cleaned == "what is the date" || cleaned == "what is today's date" || cleaned == "give me date") {
+            val dateStr = java.text.SimpleDateFormat("EEEE, MMMM d, yyyy", java.util.Locale.US).format(java.util.Date())
+            speakAloud("Today is $dateStr, sir.")
+            viewModel.sendMessage("What is today's date?", isVoice = true)
+            restartListeningIfHandsFree()
+            return
+        }
+        if (cleaned == "what year is it" || cleaned == "tell me the year" || cleaned == "what is the year") {
+            val yearStr = java.text.SimpleDateFormat("yyyy", java.util.Locale.US).format(java.util.Date())
+            speakAloud("We are currently in the year $yearStr, sir.")
+            viewModel.sendMessage("What year is it?", isVoice = true)
+            restartListeningIfHandsFree()
+            return
+        }
+
+        // 6. Match and Dispatch User Custom Shortcuts and Protocols recorded in memories
+        val matchedPreset = JarvisCommandProcessor.findMatchingAction(cleaned)
+
+        if (matchedPreset != null) {
+            viewModel.addLog("Memory Intercept: Matches custom ${matchedPreset.type} saving - executing local pipeline")
+            executeLocalAction(matchedPreset.action)
+            viewModel.sendMessage("Activated custom ${matchedPreset.type} Shortcut: '${matchedPreset.key}' -> executing '${matchedPreset.action}'.", isVoice = true)
+            restartListeningIfHandsFree()
+            return
+        }
+
+        // Check if user spoke a general protocol trigger, like "protocol 11"
+        if (cleaned.contains("protocol 11")) {
+            val localMemories = viewModel.memoriesState.value
+            val protoInst = localMemories.firstOrNull { it.key.equals("Protocol 11", ignoreCase = true) }
+            val actionVal = protoInst?.value ?: "disable_background_listening"
+            executeLocalAction(actionVal)
+            viewModel.sendMessage("Protocol 11 engaged. Muting hands-free listening sequence.", isVoice = true)
+            restartListeningIfHandsFree()
+            return
+        }
+
+        // Fallback: Send to Gemini cognitive brain
+        viewModel.sendMessage(commandText, isVoice = true)
+    }
+
+    // Dynamic core local automation action dispatcher
+    fun executeLocalAction(action: String) {
+        viewModel.addLog("Local Action Core: Resolved to action parameter: '$action'")
+        val steps = action.split(Regex("[,;]")).map { it.trim() }
+        for (step in steps) {
+            if (step.isEmpty()) continue
+            val upperAct = step.uppercase(java.util.Locale.US)
+            when {
+                upperAct.contains("DISABLE_BACKGROUND_LISTENING") || upperAct.contains("DON'T LISTEN") || upperAct.contains("STOP LISTENING") -> {
+                    viewModel.setHandsFreeEnabled(false)
+                    speakAloud("Continuous listening mode disengaged, sir.")
+                }
+                upperAct.contains("ENABLE_BACKGROUND_LISTENING") || upperAct.contains("CONTINUOUS") -> {
+                    viewModel.setHandsFreeEnabled(true)
+                    speakAloud("Continuous listening mode active, sir.")
+                }
+                upperAct.contains("FLASHLIGHT_ON") || upperAct.contains("LIGHT ON") || upperAct.contains("TURN ON FLASHLIGHT") -> {
+                    executeSystemProtocol("FLASHLIGHT_ON")
+                }
+                upperAct.contains("FLASHLIGHT_OFF") || upperAct.contains("LIGHT OFF") || upperAct.contains("TURN OFF FLASHLIGHT") -> {
+                    executeSystemProtocol("FLASHLIGHT_OFF")
+                }
+                upperAct.contains("OPEN_CAMERA") || upperAct.contains("CAMERA") -> {
+                    executeSystemProtocol("OPEN_CAMERA")
+                }
+                upperAct.contains("DND_ON") || upperAct.contains("DND ON") || upperAct.contains("SILENT ON") -> {
+                    executeSystemProtocol("DND_ON")
+                }
+                upperAct.contains("DND_OFF") || upperAct.contains("DND OFF") || upperAct.contains("SILENT OFF") -> {
+                    executeSystemProtocol("DND_OFF")
+                }
+                upperAct.contains("VOLUME_UP") || upperAct.contains("VOLUME UP") -> {
+                    executeSystemProtocol("VOLUME_UP")
+                }
+                upperAct.contains("VOLUME_DOWN") || upperAct.contains("VOLUME DOWN") -> {
+                    executeSystemProtocol("VOLUME_DOWN")
+                }
+                upperAct.contains("BRIGHTNESS_HIGH") || upperAct.contains("BRIGHTNESS MAX") -> {
+                    executeSystemProtocol("BRIGHTNESS_HIGH")
+                }
+                upperAct.contains("BRIGHTNESS_LOW") || upperAct.contains("BRIGHTNESS MIN") -> {
+                    executeSystemProtocol("BRIGHTNESS_LOW")
+                }
+                upperAct.contains("VIBRATE_DEVICE") || upperAct.contains("VIBRATE") -> {
+                    executeSystemProtocol("VIBRATE_DEVICE")
+                }
+                upperAct.contains("OPEN GOOGLE") || upperAct.contains("GOOGLE") || upperAct.contains("LAUNCH_GOOGLE_SEARCH") -> {
+                    val intent = Intent(Intent.ACTION_VIEW, android.net.Uri.parse("https://www.google.com"))
+                    intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                    startActivity(intent)
+                    speakAloud("Displaying web browser arrays, sir.")
+                }
+                upperAct.contains("OPEN YOUTUBE") || upperAct.contains("YOUTUBE") -> {
+                    val intent = Intent(Intent.ACTION_VIEW, android.net.Uri.parse("https://www.youtube.com"))
+                    intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                    startActivity(intent)
+                    speakAloud("Opening video core, sir.")
+                }
+                upperAct.contains("CALL AMMA") || upperAct.contains("CALL") || upperAct.contains("DIAL") -> {
+                    val intent = Intent(Intent.ACTION_DIAL, android.net.Uri.parse("tel:Amma"))
+                    intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                    startActivity(intent)
+                    speakAloud("Routing communication channels to coordinate with contact.")
+                }
+                else -> {
+                    speakAloud("Executing local action, sir.")
+                }
+            }
+        }
+    }
+
+    fun startKeywordService() {
+        runOnUiThread {
+            try {
+                if (speechRecognizer != null) {
+                    speechRecognizer?.cancel()
+                    speechRecognizer?.destroy()
+                    speechRecognizer = null
+                }
+                if (tts != null) {
+                    tts?.stop()
+                }
+                
+                val intent = Intent(this, com.example.service.JarvisKeywordService::class.java)
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                    startForegroundService(intent)
+                } else {
+                    startService(intent)
+                }
+                viewModel.addLog("Background Service: Always-on keyword matrix deployed.")
+            } catch (e: Exception) {
+                Log.e("JARVIS", "Failed to deploy background service", e)
+            }
+        }
+    }
+
+    fun stopKeywordService() {
+        runOnUiThread {
+            try {
+                val intent = Intent(this, com.example.service.JarvisKeywordService::class.java)
+                stopService(intent)
+                viewModel.addLog("Background Service: Keyword matrix offline.")
+            } catch (e: Exception) {
+                Log.e("JARVIS", "Failed to terminate background service", e)
+            }
+        }
+    }
+
+    fun restartListeningIfHandsFree() {
+        if (com.example.service.JarvisKeywordService.isServiceRunning) {
+            return
+        }
+        if (viewModel.handsFreeEnabled.value && !viewModel.isSpeaking.value && !viewModel.isThinking.value) {
+            window.decorView.postDelayed({
+                if (viewModel.handsFreeEnabled.value && !viewModel.isSpeaking.value && !viewModel.isThinking.value) {
+                    startSpeechToText()
+                }
+            }, 800)
+        }
+    }
+
+    fun stopListening() {
+        runOnUiThread {
+            try {
+                speechRecognizer?.stopListening()
+                speechRecognizer?.cancel()
+                viewModel.addLog("Telemetry Check: Background Audio Listener Muted")
+            } catch (e: Exception) {
+                Log.e("JARVIS", "Error stopping SpeechRecognizer", e)
+            }
+        }
+    }
+
+    // Native Speech to Text Launcher helper
+    fun startSpeechToText() {
+        runOnUiThread {
+            if (com.example.service.JarvisKeywordService.isServiceRunning) {
+                com.example.service.JarvisKeywordService.instance?.startSpeechToTextDirectly()
+                return@runOnUiThread
+            }
+            if (speechRecognizer == null) {
+                initializeSpeechRecognizer()
+            }
+            
+            val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.US)
+                putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+            }
+            try {
+                speechRecognizer?.cancel()
+                speechRecognizer?.startListening(intent)
+                Log.d("JARVIS", "SpeechRecognizer listening initiated.")
+            } catch (e: Exception) {
+                Log.e("JARVIS", "Error starting speech recognizer", e)
+                viewModel.addLog("Listen Core Error: ${e.localizedMessage}")
+                try {
+                    speechRecognizerLauncher.launch(intent)
+                } catch (fallbackEx: Exception) {
+                    Toast.makeText(this, "Voice recognition systems offline.", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+    }
+
+    private val speechRecognizerLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            val spokenText = result.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.firstOrNull() ?: ""
+            if (spokenText.isNotBlank()) {
+                handleSpokenText(spokenText)
+            }
+        }
+    }
+
+    private var isFlashlightOn = false
+
+    fun executeSystemProtocol(protocol: String) {
+        val cleaned = protocol.trim().uppercase()
+        viewModel.addLog("Triggering Protocol: $cleaned")
+        try {
+            when {
+                cleaned.contains("LAUNCH_GOOGLE_SEARCH") -> {
+                    val intent = Intent(Intent.ACTION_WEB_SEARCH)
+                    intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                    startActivity(intent)
+                    viewModel.addLog("Automation: Google Search Launched")
+                }
+                cleaned.contains("OPEN_YOUTUBE") -> {
+                    val intent = packageManager.getLaunchIntentForPackage("com.google.android.youtube") ?: Intent(Intent.ACTION_VIEW, android.net.Uri.parse("https://www.youtube.com"))
+                    intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                    startActivity(intent)
+                    viewModel.addLog("Automation: YouTube Core Activated")
+                }
+                cleaned.contains("OPEN_MAPS") -> {
+                    val intent = Intent(Intent.ACTION_VIEW, android.net.Uri.parse("geo:0,0?q=maps"))
+                    intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                    startActivity(intent)
+                    viewModel.addLog("Automation: Navigation Maps Core Online")
+                }
+                cleaned.contains("OPEN_SETTINGS") -> {
+                    val intent = Intent(Settings.ACTION_SETTINGS)
+                    intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                    startActivity(intent)
+                    viewModel.addLog("Automation: Device Settings Protocol Decrypted")
+                }
+                cleaned.contains("LAUNCH_BROWSER") -> {
+                    val intent = Intent(Intent.ACTION_VIEW, android.net.Uri.parse("https://www.google.com"))
+                    intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                    startActivity(intent)
+                    viewModel.addLog("Automation: Web Browser Grid Initialized")
+                }
+                cleaned.contains("FLASHLIGHT_ON") -> {
+                    val cameraManager = getSystemService(Context.CAMERA_SERVICE) as CameraManager
+                    val cameraId = cameraManager.cameraIdList.firstOrNull()
+                    if (cameraId != null) {
+                        cameraManager.setTorchMode(cameraId, true)
+                        isFlashlightOn = true
+                        viewModel.addLog("Automation: Flashlight ACTIVATE")
+                    } else {
+                        viewModel.addLog("Automation Error: Torch support missing")
+                    }
+                }
+                cleaned.contains("FLASHLIGHT_OFF") -> {
+                    val cameraManager = getSystemService(Context.CAMERA_SERVICE) as CameraManager
+                    val cameraId = cameraManager.cameraIdList.firstOrNull()
+                    if (cameraId != null) {
+                        cameraManager.setTorchMode(cameraId, false)
+                        isFlashlightOn = false
+                        viewModel.addLog("Automation: Flashlight DEACTIVATE")
+                    }
+                }
+                cleaned.contains("DND_ON") -> {
+                    val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                        if (nm.isNotificationPolicyAccessGranted) {
+                            nm.setInterruptionFilter(NotificationManager.INTERRUPTION_FILTER_NONE)
+                            viewModel.addLog("Automation: Do Not Disturb Mode SECURED (ON)")
+                            speakAloud("I have successfully enabled Do Not Disturb mode on your device, Ranjan.")
+                        } else {
+                            viewModel.addLog("DND Warning: Policy Access Denied. Opening settings.")
+                            speakAloud("Ranjan, I require permission to change Do Not Disturb settings. I've launched the access authorization menu for you.")
+                            val intent = Intent(Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS)
+                            intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                            startActivity(intent)
+                        }
+                    } else {
+                        viewModel.addLog("DND Error: Hardware platform incompatible with interruption filter")
+                    }
+                }
+                cleaned.contains("DND_OFF") -> {
+                    val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                        if (nm.isNotificationPolicyAccessGranted) {
+                            nm.setInterruptionFilter(NotificationManager.INTERRUPTION_FILTER_ALL)
+                            viewModel.addLog("Automation: Do Not Disturb Mode DISENGAGED (OFF)")
+                            speakAloud("I have disabled Do Not Disturb mode. Sound and alert routing are restored to normal, Ranjan.")
+                        } else {
+                            viewModel.addLog("DND Warning: Policy Access Denied. Opening settings.")
+                            speakAloud("Permission is required to control Do Not Disturb settings. I'm opening the authorization settings.")
+                            val intent = Intent(Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS)
+                            intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                            startActivity(intent)
+                        }
+                    } else {
+                        viewModel.addLog("DND Error: Hardware platform incompatible with interruption filter")
+                    }
+                }
+                cleaned.contains("READ_NOTIFICATIONS") -> {
+                    val cn = android.content.ComponentName(this, JarvisNotificationListenerService::class.java)
+                    val flat = Settings.Secure.getString(contentResolver, "enabled_notification_listeners")
+                    val isServiceEnabled = flat != null && flat.contains(cn.flattenToString())
+                    
+                    if (isServiceEnabled) {
+                        val notifs = JarvisNotificationListenerService.recentNotifications
+                        if (notifs.isEmpty()) {
+                            viewModel.addLog("Automation: Reading Notifications - Empty Array")
+                            speakAloud("You have no unread local notifications in my memory arrays, Ranjan.")
+                        } else {
+                            viewModel.addLog("Automation: Processing ${notifs.size} recent notifications")
+                            val readText = buildString {
+                                append("Here are your recent notifications, sir. ")
+                                notifs.take(3).forEachIndexed { index, notif ->
+                                    val summary = notif.replace("Source:", "from app").replace("Sender/Title:", "titled").replace("Description:", "saying")
+                                    append("Notification ${index + 1}, $summary. ")
+                                }
+                            }
+                            speakAloud(readText)
+                        }
+                    } else {
+                        viewModel.addLog("Notification Core Info: Permission required to read messages")
+                        speakAloud("Ranjan, I need permission to read system notifications. I have directed you to the settings page to grant notification listener permissions.")
+                        val intent = Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)
+                        intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                        startActivity(intent)
+                    }
+                }
+                cleaned.contains("VOLUME_UP") -> {
+                    val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+                    val currentVol = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
+                    val maxVol = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+                    val step = (maxVol / 10).coerceAtLeast(1)
+                    val targetVol = (currentVol + step).coerceAtMost(maxVol)
+                    audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, targetVol, AudioManager.FLAG_SHOW_UI)
+                    viewModel.addLog("Automation: Media Volume Increased to $targetVol/$maxVol")
+                    speakAloud("I have turned the volume up, sir.")
+                }
+                cleaned.contains("VOLUME_DOWN") -> {
+                    val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+                    val currentVol = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
+                    val maxVol = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+                    val step = (maxVol / 10).coerceAtLeast(1)
+                    val targetVol = (currentVol - step).coerceAtLeast(0)
+                    audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, targetVol, AudioManager.FLAG_SHOW_UI)
+                    viewModel.addLog("Automation: Media Volume Decreased to $targetVol/$maxVol")
+                    speakAloud("I have lowered the volume, sir.")
+                }
+                cleaned.contains("BRIGHTNESS_HIGH") -> {
+                    runOnUiThread {
+                        val lp = window.attributes
+                        lp.screenBrightness = 1.0f
+                        window.attributes = lp
+                        viewModel.addLog("Automation: Screen brightness set to maximum")
+                        speakAloud("Display brightness adjusted to maximum capacity, sir.")
+                    }
+                }
+                cleaned.contains("BRIGHTNESS_LOW") -> {
+                    runOnUiThread {
+                        val lp = window.attributes
+                        lp.screenBrightness = 0.1f
+                        window.attributes = lp
+                        viewModel.addLog("Automation: Screen brightness set to minimum")
+                        speakAloud("Display brightness dimming matrix active, sir.")
+                    }
+                }
+                cleaned.contains("SECURITY_MODE") -> {
+                    val intent = Intent(Settings.ACTION_SECURITY_SETTINGS)
+                    intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                    startActivity(intent)
+                    viewModel.addLog("Automation: Device Security Settings Open")
+                }
+                cleaned.contains("NOTIFICATION_SETTINGS") -> {
+                    val intent = Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)
+                    intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                    startActivity(intent)
+                    viewModel.addLog("Automation: Notification Listeners Opened")
+                }
+                cleaned.contains("OPEN_CAMERA") -> {
+                    val intent = Intent(MediaStore.ACTION_IMAGE_CAPTURE)
+                    intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                    startActivity(intent)
+                    viewModel.addLog("Automation: Device Camera Core Online")
+                }
+                cleaned.contains("OPEN_DIALER") -> {
+                    val intent = Intent(Intent.ACTION_DIAL)
+                    intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                    startActivity(intent)
+                    viewModel.addLog("Automation: Phone Dialer Activated")
+                }
+                cleaned.contains("VIBRATE_DEVICE") -> {
+                    val vibrator = getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        vibrator.vibrate(VibrationEffect.createOneShot(800, VibrationEffect.DEFAULT_AMPLITUDE))
+                    } else {
+                        @Suppress("DEPRECATION")
+                        vibrator.vibrate(800)
+                    }
+                    viewModel.addLog("Automation: Tactile Pulse Dispatched (800ms)")
+                }
+                cleaned.contains("SILENT_MODE") -> {
+                    val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+                    audioManager.ringerMode = AudioManager.RINGER_MODE_SILENT
+                    viewModel.addLog("Automation: Sound Core Set to Silent Mode")
+                }
+            }
+        } catch (e: Exception) {
+            viewModel.addLog("Automation Sys Error: ${e.localizedMessage}")
+            Log.e("JARVIS", "Failed to dispatch protocol: $cleaned", e)
+        }
+    }
+
+    override fun onDestroy() {
+        tts?.stop()
+        tts?.shutdown()
+        speechRecognizer?.destroy()
+        super.onDestroy()
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+fun JarvisDashboardScreen(
+    viewModel: JarvisViewModel,
+    onStartSpeechRecognition: () -> Unit
+) {
+    val context = LocalContext.current
+    val conversation by viewModel.conversationState.collectAsStateWithLifecycle()
+    val memories by viewModel.memoriesState.collectAsStateWithLifecycle()
+    val isThinking by viewModel.isThinking.collectAsStateWithLifecycle()
+    val backgroundListening by viewModel.backgroundListeningEnabled.collectAsStateWithLifecycle()
+    val handsFreeEnabled by viewModel.handsFreeEnabled.collectAsStateWithLifecycle()
+    val isSpeaking by viewModel.isSpeaking.collectAsStateWithLifecycle()
+    val automationLogs by viewModel.automationLogs.collectAsStateWithLifecycle()
+    val parseResult by viewModel.codingAnalysisResult.collectAsStateWithLifecycle()
+    val isAnalyzingCode by viewModel.isAnalyzingCode.collectAsStateWithLifecycle()
+
+    var activeTab by remember { mutableIntStateOf(0) }
+    var textMessage by remember { mutableStateOf("") }
+    val scrollState = rememberLazyListState()
+
+    // Observe speaker events from ViewModel
+    LaunchedEffect(Unit) {
+        viewModel.speakEvent.collect { textToSpeak ->
+            val activity = context as? MainActivity
+            activity?.speakAloud(textToSpeak)
+            viewModel.addLog("TTS speaking response")
+        }
+    }
+
+    // Toggle background service on Hands-Free setting change
+    LaunchedEffect(handsFreeEnabled) {
+        val activity = context as? MainActivity
+        if (handsFreeEnabled) {
+            activity?.startKeywordService()
+        } else {
+            activity?.stopKeywordService()
+        }
+    }
+
+    // Scroll chat automatically to the end on new message entry
+    LaunchedEffect(conversation.size) {
+        if (conversation.isNotEmpty()) {
+            scrollState.animateScrollToItem(conversation.size - 1)
+        }
+    }
+
+    var lastProcessedMessageId by remember { mutableStateOf<Long?>(null) }
+
+    LaunchedEffect(conversation) {
+        val lastMessage = conversation.lastOrNull()
+        if (lastMessage != null && lastMessage.sender == "JARVIS" && lastMessage.id != lastProcessedMessageId) {
+            lastProcessedMessageId = lastMessage.id
+            val text = lastMessage.text
+            val protocolRegex = Regex("\\[PROTOCOL:([A-Z_]+)\\]")
+            val matches = protocolRegex.findAll(text)
+            val activity = context as? MainActivity
+            matches.forEach { match ->
+                val protocolName = match.groupValues[1]
+                activity?.executeSystemProtocol(protocolName)
+            }
+        }
+    }
+
+    val activity = context as? MainActivity
+
+    Scaffold(
+        modifier = Modifier
+            .fillMaxSize()
+            .pointerInput(isSpeaking) {
+                if (isSpeaking) {
+                    detectTapGestures {
+                        activity?.stopSpeakingAndListen()
+                    }
+                }
+            },
+        containerColor = MaterialTheme.colorScheme.background,
+        bottomBar = {
+            // Elegant Cosmic Bottom Navigation Rail / Pill Bar
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .navigationBarsPadding(),
+                color = JarvisSurface,
+                tonalElevation = 8.dp
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 8.dp, horizontal = 16.dp),
+                    horizontalArrangement = Arrangement.SpaceAround,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    val tabs = listOf(
+                        Triple(0, "CHAT", Icons.Default.PlayArrow), // representing console
+                        Triple(1, "CODING", Icons.Default.List), // representing L&D suite
+                        Triple(2, "VOICE MEM", Icons.Default.Info), // representing Memory
+                        Triple(3, "AUTOM", Icons.Default.Settings) // representing logs/automation
+                    )
+                    tabs.forEach { (index, title, icon) ->
+                        val isSelected = activeTab == index
+                        Column(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(12.dp))
+                                .clickable { activeTab = index }
+                                .padding(vertical = 8.dp, horizontal = 12.dp)
+                                .testTag("tab_$index"),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Icon(
+                                imageVector = icon,
+                                contentDescription = title,
+                                tint = if (isSelected) JarvisPrimary else JarvisTextSecondary,
+                                modifier = Modifier.size(24.dp)
+                            )
+                            Text(
+                                text = title,
+                                fontSize = 10.sp,
+                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                                color = if (isSelected) JarvisPrimary else JarvisTextSecondary,
+                                fontFamily = FontFamily.Monospace
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    ) { innerPadding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(innerPadding)
+                .background(
+                    Brush.verticalGradient(
+                        colors = listOf(JarvisBackground, Color(0xFF141316))
+                    )
+                )
+        ) {
+            // ---- SYSTEM HEADER ----
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp),
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = JarvisSurface),
+                border = BorderStroke(1.dp, JarvisSurfaceVariant)
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(
+                                modifier = Modifier
+                                    .size(8.dp)
+                                    .clip(CircleShape)
+                                    .background(if (isThinking) JarvisTertiary else if (handsFreeEnabled) JarvisSuccess else JarvisPrimary)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = if (isThinking) "JARVIS SYNAPSE ACTIVE" else if (handsFreeEnabled) "JARVIS ALWAYS-ON" else "JARVIS CORES ONLINE",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = if (isThinking) JarvisTertiary else if (handsFreeEnabled) JarvisSuccess else JarvisPrimary,
+                                fontFamily = FontFamily.Monospace
+                            )
+                        }
+                        Text(
+                            text = if (handsFreeEnabled) "Background continuous mic stream: ACTIVE" else "Voice memory registers: ${memories.size} units",
+                            fontSize = 11.sp,
+                            color = JarvisTextSecondary,
+                            fontFamily = FontFamily.Monospace
+                        )
+                    }
+                    Card(
+                        colors = CardDefaults.cardColors(
+                            containerColor = if (handsFreeEnabled) JarvisSuccess.copy(alpha = 0.15f) else JarvisSurfaceVariant
+                        ),
+                        border = if (handsFreeEnabled) BorderStroke(1.dp, JarvisSuccess.copy(alpha = 0.4f)) else null,
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Text(
+                            text = if (handsFreeEnabled) "SENTINEL ONLINE" else "UPTIME VERIFIED",
+                            fontSize = 10.sp,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                            color = if (handsFreeEnabled) JarvisSuccess else JarvisSuccess,
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = FontFamily.Monospace
+                        )
+                    }
+                }
+            }
+
+            // ---- MAIN PANEL DISPLAY ----
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+            ) {
+                when (activeTab) {
+                    0 -> ChatConsoleTab(
+                        conversation = conversation,
+                        scrollState = scrollState,
+                        isThinking = isThinking,
+                        isSpeaking = isSpeaking,
+                        backgroundListening = backgroundListening,
+                        handsFreeEnabled = handsFreeEnabled,
+                        onMessageSent = { msg -> viewModel.sendMessage(msg) },
+                        onStartSpeech = onStartSpeechRecognition,
+                        onToggleListening = { viewModel.setBackgroundListening(!backgroundListening) },
+                        onToggleHandsFree = { viewModel.setHandsFreeEnabled(!handsFreeEnabled) }
+                    )
+                    1 -> CodeSuiteTab(
+                        isAnalyzing = isAnalyzingCode,
+                        analysisResult = parseResult,
+                        onAnalyze = { code, mode -> viewModel.analyzeCode(code, mode) }
+                    )
+                    2 -> CognitiveBankTab(
+                        memories = memories,
+                        onDeleteMemory = { id -> viewModel.deleteMemory(id) }
+                    )
+                    3 -> AutomationSystemTab(
+                        logs = automationLogs
+                    )
+                }
+            }
+        }
+    }
+}
+
+// =================== CONVERSATION TAB ===================
+@Composable
+fun ChatConsoleTab(
+    conversation: List<ConversationMessage>,
+    scrollState: androidx.compose.foundation.lazy.LazyListState,
+    isThinking: Boolean,
+    isSpeaking: Boolean,
+    backgroundListening: Boolean,
+    handsFreeEnabled: Boolean,
+    onMessageSent: (String) -> Unit,
+    onStartSpeech: () -> Unit,
+    onToggleListening: () -> Unit,
+    onToggleHandsFree: () -> Unit
+) {
+    Column(modifier = Modifier.fillMaxSize()) {
+        // Chat messages LazyColumn
+        LazyColumn(
+            state = scrollState,
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            items(conversation) { msg ->
+                val isJarvis = msg.sender == "JARVIS"
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = if (isJarvis) Arrangement.Start else Arrangement.End
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth(0.85f)
+                            .clip(
+                                RoundedCornerShape(
+                                    topStart = 16.dp,
+                                    topEnd = 16.dp,
+                                    bottomStart = if (isJarvis) 4.dp else 16.dp,
+                                    bottomEnd = if (isJarvis) 16.dp else 4.dp
+                                )
+                            )
+                            .background(
+                                if (isJarvis) JarvisSurface else JarvisSurfaceVariant
+                            )
+                            .border(
+                                1.dp,
+                                if (isJarvis) JarvisPrimary.copy(alpha = 0.3f) else Color.Transparent,
+                                RoundedCornerShape(
+                                    topStart = 16.dp,
+                                    topEnd = 16.dp,
+                                    bottomStart = if (isJarvis) 4.dp else 16.dp,
+                                    bottomEnd = if (isJarvis) 16.dp else 4.dp
+                                )
+                            )
+                            .padding(14.dp)
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(
+                                text = msg.sender,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = if (isJarvis) JarvisPrimary else JarvisSecondary,
+                                fontFamily = FontFamily.Monospace
+                            )
+                            Text(
+                                text = "VERIFIED SECURE",
+                                fontSize = 8.sp,
+                                color = JarvisTextSecondary.copy(alpha = 0.5f),
+                                fontFamily = FontFamily.Monospace
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(6.dp))
+                        if (msg.isCode) {
+                            // Render code panel
+                            Card(
+                                colors = CardDefaults.cardColors(containerColor = Color(0xFF141316)),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 4.dp),
+                                border = BorderStroke(1.dp, JarvisSurfaceVariant)
+                            ) {
+                                Text(
+                                    text = msg.text,
+                                    color = JarvisPrimary,
+                                    fontSize = 12.sp,
+                                    fontFamily = FontFamily.Monospace,
+                                    modifier = Modifier
+                                        .padding(10.dp)
+                                        .fillMaxWidth()
+                                )
+                            }
+                        } else {
+                            Text(
+                                text = msg.text,
+                                color = JarvisTextPrimary,
+                                fontSize = 14.sp,
+                                lineHeight = 20.sp
+                            )
+                        }
+                    }
+                }
+            }
+ 
+            if (isThinking) {
+                item {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.Start
+                    ) {
+                        Card(
+                            colors = CardDefaults.cardColors(containerColor = JarvisSurface),
+                            modifier = Modifier.padding(vertical = 4.dp),
+                            border = BorderStroke(1.dp, JarvisTertiary.copy(alpha = 0.3f))
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(12.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(16.dp),
+                                    strokeWidth = 2.dp,
+                                    color = JarvisTertiary
+                                )
+                                Spacer(modifier = Modifier.width(10.dp))
+                                Text(
+                                    text = "Analyzing synaptic routing...",
+                                    color = JarvisTextSecondary,
+                                    fontSize = 12.sp,
+                                    fontFamily = FontFamily.Monospace
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+ 
+        // Animated sound-wave visualization for Voice Chat mode
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 24.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center
+        ) {
+            VoicePulseCoreVisualizer(
+                isThinking = isThinking,
+                isSpeaking = isSpeaking,
+                handsFreeEnabled = handsFreeEnabled,
+                onStartSpeech = onStartSpeech
+            )
+        }
+    }
+}
+
+// Animated soundwave feedback drawing
+@Composable
+fun VoicePulseCoreVisualizer(
+    isThinking: Boolean,
+    isSpeaking: Boolean,
+    handsFreeEnabled: Boolean,
+    onStartSpeech: () -> Unit
+) {
+    val infiniteTransition = rememberInfiniteTransition(label = "pulse")
+    
+    // Rotating arc degrees animation
+    val rotationAngle by infiniteTransition.animateFloat(
+        initialValue =  0f,
+        targetValue = 360f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(4000, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "rotation"
+    )
+
+    // Pulsing outer glow radius animation
+    val pulseScale by infiniteTransition.animateFloat(
+        initialValue = 0.8f,
+        targetValue = 1.3f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(if (isThinking) 600 else if (isSpeaking) 900 else 1800, easing = EaseInOutSine),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "pulse_scale"
+    )
+
+    val coreColor = when {
+        isThinking -> JarvisPrimary
+        isSpeaking -> JarvisSuccess
+        handsFreeEnabled -> Color(0xFF80DEEA) // Glowing cyan for active listening
+        else -> JarvisSecondary
+    }
+
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = Modifier.padding(vertical = 16.dp)
+    ) {
+        Box(
+            modifier = Modifier
+                .size(110.dp)
+                .clip(CircleShape)
+                .background(
+                    Brush.radialGradient(
+                        colors = listOf(
+                            coreColor.copy(alpha = 0.15f),
+                            coreColor.copy(alpha = 0.03f),
+                            Color.Transparent
+                        )
+                    )
+                )
+                .testTag("vocal_core_button"),
+            contentAlignment = Alignment.Center
+        ) {
+            Canvas(modifier = Modifier.fillMaxSize()) {
+                val r = size.minDimension / 2
+                val center = Offset(size.width / 2, size.height / 2)
+
+                // 1. Outer radiating pulse wave
+                drawCircle(
+                    color = coreColor,
+                    radius = r * 0.75f * pulseScale,
+                    style = Stroke(width = 1.5.dp.toPx()),
+                    alpha = 0.15f
+                )
+
+                // 2. Spinning outer technical ring with gaps (Ark Reactor style)
+                drawArc(
+                    color = coreColor.copy(alpha = 0.4f),
+                    startAngle = rotationAngle,
+                    sweepAngle = 70f,
+                    useCenter = false,
+                    topLeft = Offset(center.x - r * 0.70f, center.y - r * 0.70f),
+                    size = androidx.compose.ui.geometry.Size(r * 1.4f, r * 1.4f),
+                    style = Stroke(width = 2.dp.toPx())
+                )
+                
+                drawArc(
+                    color = coreColor.copy(alpha = 0.4f),
+                    startAngle = rotationAngle + 180f,
+                    sweepAngle = 70f,
+                    useCenter = false,
+                    topLeft = Offset(center.x - r * 0.70f, center.y - r * 0.70f),
+                    size = androidx.compose.ui.geometry.Size(r * 1.4f, r * 1.4f),
+                    style = Stroke(width = 2.dp.toPx())
+                )
+
+                // 3. Inner technical guiding ring
+                drawCircle(
+                    color = coreColor.copy(alpha = 0.12f),
+                    radius = r * 0.55f,
+                    style = Stroke(width = 1.dp.toPx())
+                )
+            }
+
+            // 4. Center Glowing Orb
+            Box(
+                modifier = Modifier
+                    .size(56.dp)
+                    .clip(CircleShape)
+                    .background(
+                        Brush.linearGradient(
+                            listOf(
+                                coreColor,
+                                JarvisAccent
+                            )
+                        )
+                    ),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = if (isSpeaking) Icons.Default.VolumeUp else Icons.Default.Mic,
+                    contentDescription = "Speak trigger",
+                    tint = JarvisBackground,
+                    modifier = Modifier.size(24.dp)
+                )
+            }
+        }
+        Spacer(modifier = Modifier.height(10.dp))
+        Text(
+            text = when {
+                isThinking -> "SYNCHRONIZING SECURE ROUTING"
+                isSpeaking -> "ACTIVE VERBAL FEEDBACK"
+                handsFreeEnabled -> "HANDS-FREE CONTINUOUS WAVEFORM ACTIVE"
+                else -> "JARVIS VOCAL SYSTEM STANDBY"
+            },
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Bold,
+            color = coreColor,
+            fontFamily = FontFamily.Monospace,
+            letterSpacing = 1.2.sp
+        )
+    }
+}
+
+// =================== L&D WORKSPACE (CODING) TAB ===================
+@Composable
+fun CodeSuiteTab(
+    isAnalyzing: Boolean,
+    analysisResult: String?,
+    onAnalyze: (String, String) -> Unit
+) {
+    var rawCodeInput by remember { mutableStateOf("") }
+    var selectedTask by remember { mutableStateOf("EXPLAIN") }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(16.dp)
+    ) {
+        // High-contrast Learning Context decorative card from design guidelines
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(bottom = 12.dp)
+                .testTag("learning_context_card"),
+            shape = RoundedCornerShape(24.dp),
+            colors = CardDefaults.cardColors(
+                containerColor = JarvisSecondary,
+                contentColor = JarvisOnSecondaryContainer
+            )
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.Top
+                ) {
+                    Column {
+                        Text(
+                            text = "Learning Context",
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            fontStyle = androidx.compose.ui.text.font.FontStyle.Italic,
+                            color = JarvisOnSecondaryContainer
+                        )
+                        Text(
+                            text = "Project: AI Automation Hub",
+                            fontSize = 12.sp,
+                            color = JarvisOnSecondaryContainer.copy(alpha = 0.7f)
+                        )
+                    }
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = JarvisOnSecondaryContainer),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Text(
+                            text = "ACTIVE",
+                            fontSize = 9.sp,
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = FontFamily.Monospace,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                        )
+                    }
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    listOf("Python", "Rust", "Tailwind", "Kotlin").forEach { tag ->
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(8.dp))
+                                .border(1.dp, JarvisOnSecondaryContainer.copy(alpha = 0.2f), RoundedCornerShape(8.dp))
+                                .background(JarvisOnSecondaryContainer.copy(alpha = 0.1f))
+                                .padding(horizontal = 8.dp, vertical = 4.dp)
+                        ) {
+                            Text(
+                                text = tag,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = JarvisOnSecondaryContainer,
+                                fontFamily = FontFamily.Monospace
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = JarvisSurface),
+            border = BorderStroke(1.dp, JarvisSurfaceVariant)
+        ) {
+            Column(modifier = Modifier.padding(14.dp)) {
+                Text(
+                    text = "💻 L&D PROGRAMMING SANDBOX",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = JarvisPrimary,
+                    fontFamily = FontFamily.Monospace
+                )
+                Text(
+                    text = when (selectedTask) {
+                        "ADD_FEATURE" -> "Process prompt as custom code, dynamically hot-swapping running app feature."
+                        "AUTO_FIX" -> "Enter faulty compilation trace or code to find the bug & hot-patch automatically."
+                        else -> "Submit a logic stack or compile issue to debug and format."
+                    },
+                    fontSize = 11.sp,
+                    color = JarvisTextSecondary
+                )
+                Spacer(modifier = Modifier.height(10.dp))
+
+                TextField(
+                    value = rawCodeInput,
+                    onValueChange = { rawCodeInput = it },
+                    placeholder = {
+                        Text(
+                            text = when (selectedTask) {
+                                "ADD_FEATURE" -> "Describe the feature to add (e.g. 'Add shortcut silent mode to put brightness low and vibration on')..."
+                                "AUTO_FIX" -> "Enter erroneous code to trace & auto-compile fix..."
+                                "BUGS" -> "Insert code statement with potential bugs here..."
+                                else -> "Insert code snippet / compilation trace here..."
+                            },
+                            color = JarvisTextSecondary,
+                            fontSize = 12.sp,
+                            fontFamily = FontFamily.Monospace
+                        )
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(140.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .border(1.dp, JarvisSurfaceVariant, RoundedCornerShape(8.dp))
+                        .testTag("code_input_field"),
+                    colors = TextFieldDefaults.colors(
+                        focusedContainerColor = Color(0xFF141316),
+                        unfocusedContainerColor = Color(0xFF141316),
+                        focusedIndicatorColor = Color.Transparent,
+                        unfocusedIndicatorColor = Color.Transparent,
+                        focusedTextColor = JarvisSecondary,
+                        unfocusedTextColor = JarvisSecondary
+                    ),
+                    textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+                )
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // Action modes: Row 1
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    listOf(
+                        "EXPLAIN" to "Explain Code",
+                        "BUGS" to "Find Errors"
+                    ).forEach { (key, display) ->
+                        val isSel = selectedTask == key
+                        Button(
+                            onClick = { selectedTask = key },
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("btn_mode_$key"),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = if (isSel) JarvisPrimary else JarvisSurfaceVariant,
+                                contentColor = if (isSel) JarvisBackground else JarvisTextPrimary
+                            ),
+                            contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp)
+                        ) {
+                            Text(display, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(6.dp))
+
+                // Action modes: Row 2
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    listOf(
+                        "AUTO_FIX" to "Auto-Fix",
+                        "ADD_FEATURE" to "Prompt Feature"
+                    ).forEach { (key, display) ->
+                        val isSel = selectedTask == key
+                        Button(
+                            onClick = { selectedTask = key },
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("btn_mode_$key"),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = if (isSel) JarvisPrimary else JarvisSurfaceVariant,
+                                contentColor = if (isSel) JarvisBackground else JarvisTextPrimary
+                            ),
+                            contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp)
+                        ) {
+                            Text(display, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                Button(
+                    onClick = { onAnalyze(rawCodeInput, selectedTask) },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp)
+                        .testTag("execute_code_analysis_button"),
+                    colors = ButtonDefaults.buttonColors(containerColor = JarvisAccent),
+                    enabled = rawCodeInput.isNotBlank() && !isAnalyzing
+                ) {
+                    if (isAnalyzing) {
+                        CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp, color = Color.White)
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Text(
+                            text = when (selectedTask) {
+                                "ADD_FEATURE" -> "Hot-swapping bytecode..."
+                                "AUTO_FIX" -> "Compiling sandbox fix..."
+                                else -> "Parsing Syntax Array..."
+                            },
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 12.sp
+                        )
+                    } else {
+                        Text(
+                            text = when (selectedTask) {
+                                "ADD_FEATURE" -> "GENERATE & APPLY FEATURE"
+                                "AUTO_FIX" -> "CORRECT & UPDATE SANDBOX"
+                                else -> "EXECUTE DIAGNOSTIC PROCESS"
+                            },
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 12.sp
+                        )
+                    }
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        // Output Terminal Results Panel
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f),
+            colors = CardDefaults.cardColors(containerColor = JarvisSurface),
+            border = BorderStroke(1.dp, JarvisSurfaceVariant)
+        ) {
+            Column(modifier = Modifier.padding(14.dp)) {
+                Text(
+                    text = "🖥️ SECURE EVALUATION RESULT",
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = JarvisAccent,
+                    fontFamily = FontFamily.Monospace
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Divider(color = JarvisSurfaceVariant)
+                Spacer(modifier = Modifier.height(8.dp))
+
+                Box(modifier = Modifier.fillMaxSize()) {
+                    if (analysisResult != null) {
+                        LazyColumn(modifier = Modifier.fillMaxSize()) {
+                            item {
+                                Text(
+                                    text = analysisResult,
+                                    color = JarvisTextPrimary,
+                                    fontSize = 13.sp,
+                                    lineHeight = 18.sp,
+                                    fontFamily = FontFamily.Monospace
+                                )
+                            }
+                        }
+                    } else {
+                        Column(
+                            modifier = Modifier.fillMaxSize(),
+                            verticalArrangement = Arrangement.Center,
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Icon(Icons.Default.Info, contentDescription = null, tint = JarvisTextSecondary.copy(alpha = 0.5f), modifier = Modifier.size(36.dp))
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Text(
+                                "No evaluation results ready.",
+                                color = JarvisTextSecondary,
+                                fontSize = 12.sp,
+                                fontFamily = FontFamily.Monospace
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// =================== COGNITIVE BANK (MEMORIES) TAB ===================
+@Composable
+fun CognitiveBankTab(
+    memories: List<UserMemory>,
+    onDeleteMemory: (Long) -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(16.dp)
+    ) {
+        // Voice Memory storage banner
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(bottom = 12.dp),
+            colors = CardDefaults.cardColors(containerColor = JarvisSurface),
+            border = BorderStroke(1.dp, JarvisPrimary.copy(alpha = 0.3f))
+        ) {
+            Column(modifier = Modifier.padding(14.dp)) {
+                Text(
+                    text = "🎙️ MEMORY STORAGE DECK",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = JarvisPrimary,
+                    fontFamily = FontFamily.Monospace
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = "JARVIS automatically records and persists all your voice-configured commands, personalized bio preferences, and system protocols. Try speaking commands such as 'remember command play music to launch youtube' or 'Protocol 11 to silent mode' to store them securely. All dynamic parameters are synchronized here.",
+                    fontSize = 11.sp,
+                    color = JarvisTextSecondary,
+                    lineHeight = 16.sp
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(6.dp))
+
+        Text(
+            text = "ACTIVE VOICE MEMORY SYNC REGISTRY",
+            fontSize = 10.sp,
+            fontWeight = FontWeight.Bold,
+            color = JarvisTextSecondary,
+            fontFamily = FontFamily.Monospace,
+            modifier = Modifier.padding(bottom = 8.dp)
+        )
+
+        // Memory registers list
+        if (memories.isEmpty()) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+                    .background(JarvisSurface, RoundedCornerShape(12.dp))
+                    .border(BorderStroke(1.dp, JarvisSurfaceVariant), RoundedCornerShape(12.dp)),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = "No vocal registries logged. Say 'Hey Jarvis, remember command ...' to populate.",
+                    color = JarvisTextSecondary,
+                    fontSize = 11.sp,
+                    fontFamily = FontFamily.Monospace,
+                    modifier = Modifier.padding(16.dp),
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                )
+            }
+        } else {
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                items(memories) { mem ->
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(containerColor = JarvisSurface),
+                        border = BorderStroke(1.dp, JarvisSurfaceVariant)
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Box(
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(4.dp))
+                                            .background(
+                                                when (mem.category) {
+                                                    "shortcut" -> Color(0xFFFFB74D).copy(alpha = 0.2f)
+                                                    "protocol" -> Color(0xFF81C784).copy(alpha = 0.2f)
+                                                    "preference" -> JarvisSecondary.copy(alpha = 0.2f)
+                                                    "fact" -> JarvisPrimary.copy(alpha = 0.2f)
+                                                    else -> JarvisTertiary.copy(alpha = 0.2f)
+                                                }
+                                            )
+                                            .padding(horizontal = 6.dp, vertical = 2.dp)
+                                    ) {
+                                        Text(
+                                            text = mem.category.uppercase(),
+                                            fontSize = 8.sp,
+                                            color = when (mem.category) {
+                                                "shortcut" -> Color(0xFFFFB74D)
+                                                "protocol" -> Color(0xFF81C784)
+                                                "preference" -> JarvisSecondary
+                                                "fact" -> JarvisPrimary
+                                                else -> JarvisTertiary
+                                            },
+                                            fontFamily = FontFamily.Monospace,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+                                }
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    text = "Trigger/Key: \"${mem.key}\"",
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = JarvisTextPrimary
+                                )
+                                Text(
+                                    text = "Action/Value: ${mem.value}",
+                                    fontSize = 11.sp,
+                                    color = JarvisPrimary,
+                                    fontFamily = FontFamily.Monospace
+                                )
+                            }
+
+                            IconButton(
+                                onClick = { onDeleteMemory(mem.id) },
+                                modifier = Modifier.testTag("delete_mem_${mem.id}")
+                            ) {
+                                Icon(Icons.Default.Delete, contentDescription = "Delete Memory Flag", tint = JarvisError.copy(alpha = 0.8f))
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// =================== AUTOMATION LOGS TAB ===================
+@Composable
+fun AutomationSystemTab(
+    logs: List<String>
+) {
+    LazyColumn(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp)
+    ) {
+        // Highlighting Voice-Only Hands-Free Capability
+        item {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = JarvisSurface),
+                border = BorderStroke(1.dp, JarvisPrimary)
+            ) {
+                Column(modifier = Modifier.padding(14.dp)) {
+                    Text(
+                        text = "🎙️ HANDS-FREE VOICE DECK STANDBY",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = JarvisPrimary,
+                        fontFamily = FontFamily.Monospace
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "The entire system is responsive 100% via background voice wake-word triggers. Simply speak 'Hey Jarvis' or just wake-word followed by any protocol or command. No manual clicks required!",
+                        color = JarvisTextSecondary,
+                        fontSize = 11.sp,
+                        lineHeight = 15.sp
+                    )
+
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Divider(color = JarvisSurfaceVariant)
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    Text(
+                        text = "💡 VOCAL COMMAND AUTOMATION DIRECTORY:",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = JarvisSecondary,
+                        fontFamily = FontFamily.Monospace
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+
+                    val commandGuide = listOf(
+                        "Flashlight On" to "Say: \"Jarvis, turn on flashlight\" or \"light on\"",
+                        "Flashlight Off" to "Say: \"Jarvis, turn off flashlight\" or \"light off\"",
+                        "Vibrate Device" to "Say: \"Jarvis, vibrate device\"",
+                        "Camera Launch" to "Say: \"Jarvis, open camera\" or \"camera\"",
+                        "YouTube Core" to "Say: \"Jarvis, open YouTube\"",
+                        "Maps Search" to "Say: \"Jarvis, open Maps\" or \"coordinates\"",
+                        "Comms Dialer" to "Say: \"Jarvis, open dialer\"",
+                        "Silent Mode" to "Say: \"Jarvis, silent on\" or \"mute\"",
+                        "Unmute Sound" to "Say: \"Jarvis, silent off\" or \"unmute\"",
+                        "Read Alerts" to "Say: \"Jarvis, read notifications\"",
+                        "Time Sweep" to "Say: \"Jarvis, tell me the time\" or \"current time\""
+                    )
+
+                    commandGuide.forEach { (action, phrase) ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 4.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = action,
+                                fontSize = 10.5.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = JarvisTextPrimary,
+                                fontFamily = FontFamily.Monospace
+                            )
+                            Text(
+                                text = phrase,
+                                fontSize = 10.sp,
+                                color = JarvisPrimary,
+                                fontFamily = FontFamily.Monospace
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        // Active Logs Terminal Panel
+        item {
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(350.dp),
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF141316)),
+                border = BorderStroke(1.dp, JarvisSurfaceVariant)
+            ) {
+                Column(modifier = Modifier.padding(14.dp)) {
+                    Text(
+                        text = "⌨️ SYNAPTIC LOGS STREAM",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = JarvisSecondary,
+                        fontFamily = FontFamily.Monospace
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Divider(color = JarvisSurfaceVariant)
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    LazyColumn(
+                        modifier = Modifier.fillMaxSize(),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        items(logs) { log ->
+                            Text(
+                                text = log,
+                                color = JarvisTextSecondary,
+                                fontSize = 11.sp,
+                                fontFamily = FontFamily.Monospace,
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
