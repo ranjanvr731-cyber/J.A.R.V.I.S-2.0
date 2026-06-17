@@ -17,6 +17,7 @@ import com.example.data.network.GenerateContentRequest
 import com.example.data.network.GenerationConfig
 import com.example.data.network.Part
 import com.example.data.network.RetrofitClient
+import com.example.brain.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
@@ -32,6 +33,23 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     private val repository by lazy { JarvisRepository(database.jarvisDao()) }
+
+    // --- Advanced Hybrid AI Brain Modules ---
+    val memoryManager by lazy { MemoryManager(repository) }
+    val learningEngine by lazy { LearningEngine(repository) }
+    val voiceManager by lazy { VoiceManager() }
+    val wakeWordManager by lazy { WakeWordManager() }
+    val securityManager by lazy { SecurityManager(getApplication()) }
+    val notificationManager by lazy { NotificationManager() }
+    val contextManager by lazy { ContextManager() }
+    val offlineAIManager by lazy { OfflineAIManager() }
+    val onlineAIManager by lazy { OnlineAIManager() }
+    val selfDiagnosticSystem by lazy { SelfDiagnosticSystem(getApplication()) }
+    val taskPlanner by lazy { TaskPlanner() }
+    val personalityEngine by lazy { PersonalityEngine() }
+    val analyticsEngine by lazy { AnalyticsEngine() }
+    val automationEngine by lazy { AutomationEngine() }
+    val pluginManager by lazy { PluginManager() }
 
     // Chat history
     val conversationState: StateFlow<List<ConversationMessage>> = repository.allMessages
@@ -104,43 +122,106 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
-    // Sends text to the Gemini API
+    // Sends text through advanced cognitive modular brains
     fun sendMessage(text: String, isVoice: Boolean = false) {
         if (text.isBlank()) return
 
+        val startTime = System.currentTimeMillis()
         viewModelScope.launch {
-            // 1. Insert user message to Room database
+            // 1. Context & Pronoun tracker
+            contextManager.updateContextHistory(conversationState.value.takeLast(5))
+            val resolvedText = contextManager.resolvePronounsInQuery(text)
+
+            // 2. Security Auditor
+            if (!securityManager.auditInputActivity(resolvedText)) {
+                securityManager.logSecurityIndicator("Blocked prompt due to secure vulnerability flag.")
+                val securityAlertMsg = ConversationMessage(
+                    sender = "JARVIS",
+                    text = "Caution, Bro. That statement did not pass my local security protocol layers. Proceeding is prohibited in safe-sandbox status."
+                )
+                repository.insertMessage(ConversationMessage(sender = "USER", text = text))
+                repository.insertMessage(securityAlertMsg)
+                _speakEvent.emit("Caution, Bro. That request did not pass my system safety constraints.")
+                return@launch
+            }
+
+            // 3. Register user message to SQLite Room database
             val userMsg = ConversationMessage(sender = "USER", text = text)
             repository.insertMessage(userMsg)
             _isThinking.value = true
 
-            // 2. Fetch recent conversation context to supply to Gemini
-            val history = conversationState.value.takeLast(10)
-            val geminiPrompt = buildPromptWithContext(text, history)
+            // 4. Create Task Progress execution plan
+            val steps = taskPlanner.createExecutionPlan(resolvedText)
+            steps.forEach { step ->
+                Log.d("JARVIS_PLAN", "Planning execution step: ${step.description}")
+            }
 
-            // 3. Make background REST API call
-            val responseText = callGeminiAPI(geminiPrompt)
+            var responseText = ""
+
+            // 5. Check offline status vs online hybrid AI, and dynamic rules
+            val isOnline = selfDiagnosticSystem.runDiagnosticCheck().isNetworkAvailable
+            val matchedAutomation = automationEngine.findAutomationAction(resolvedText)
+            val matchedPlugin = pluginManager.processPluginKeyword(resolvedText)
+
+            if (matchedAutomation != null) {
+                responseText = "Executing automated sequence: $matchedAutomation. All systems aligned, Bro! [PROTOCOL:$matchedAutomation]"
+            } else if (matchedPlugin != null) {
+                responseText = matchedPlugin
+            } else if (!isOnline) {
+                // FALLBACK TO OFFLINE AI ENGINES
+                responseText = offlineAIManager.processOfflineQuery(resolvedText)
+            } else {
+                // ONLINE CLOUD GEN AI PIPELINE
+                val history = conversationState.value.takeLast(10)
+                val geminiPrompt = buildPromptWithContext(resolvedText, history)
+                responseText = callGeminiAPI(geminiPrompt)
+                
+                // Cache online reply for offline resilience
+                offlineAIManager.cacheReponse(resolvedText, responseText)
+            }
 
             _isThinking.value = false
 
-            // 4. Save JARVIS's response
+            // 6. Personality Augmentation
+            val augmentedResponse = personalityEngine.augmentResponse(responseText)
+
+            // 7. Save JARVIS's response
             val jarvisMsg = ConversationMessage(
                 sender = "JARVIS",
-                text = responseText,
-                isCode = responseText.contains("```")
+                text = augmentedResponse,
+                isCode = augmentedResponse.contains("```")
             )
             repository.insertMessage(jarvisMsg)
 
-            // 5. Trigger Text To Speech
+            // 8. Voice Resonance & Emotion adaptation
+            val voiceEmotion = voiceManager.parseEmotionFromResponse(augmentedResponse)
+            Log.d("JARVIS_VOICE", "Voice style tone tuned to: ${voiceEmotion.name}")
+
+            // 9. Trigger Text To Speech
             if (isVoice || backgroundListeningEnabled.value) {
-                // strip out code blocks from TTS
-                val speakableText = responseText.replace(Regex("```[a-zA-Z]*\\n[\\s\\S]*?\\n```"), "[Code snippet displayed on screen]")
+                val speakableText = augmentedResponse.replace(Regex("```[a-zA-Z]*\\n[\\s\\S]*?\\n```"), "[Code snapshot has been compiled on screen]")
                 _isSpeaking.value = true
                 _speakEvent.emit(speakableText)
             }
 
-            // 6. Proactive preference learning: Extract preferences from message
-            extractPreferencesProactively(text)
+            // 10. Learn from User Corrections proactively
+            analyzeCorrectionsProactively(text, resolvedText)
+
+            // 11. Learn preferences proactively
+            extractPreferencesProactively(resolvedText)
+
+            // 12. Log Performance telemetry stats
+            val stopTime = System.currentTimeMillis()
+            analyticsEngine.logOperationLatency("SendMessageWorkflow", stopTime - startTime)
+        }
+    }
+
+    private fun analyzeCorrectionsProactively(original: String, resolved: String) {
+        viewModelScope.launch {
+            if (original.contains("no", ignoreCase = true) || original.contains("incorrect", ignoreCase = true) || original.contains("correct", ignoreCase = true)) {
+                learningEngine.registerCorrection(original, resolved)
+                addLog("Learning Core: User correction registered.")
+            }
         }
     }
 

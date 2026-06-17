@@ -17,7 +17,14 @@ data class Content(
 
 @JsonClass(generateAdapter = true)
 data class Part(
-    @Json(name = "text") val text: String
+    @Json(name = "text") val text: String? = null,
+    @Json(name = "inlineData") val inlineData: InlineData? = null
+)
+
+@JsonClass(generateAdapter = true)
+data class InlineData(
+    @Json(name = "mimeType") val mimeType: String,
+    @Json(name = "data") val data: String // Base64 representation of image byte array
 )
 
 @JsonClass(generateAdapter = true)

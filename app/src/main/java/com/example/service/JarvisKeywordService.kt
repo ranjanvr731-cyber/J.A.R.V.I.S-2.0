@@ -346,6 +346,10 @@ class JarvisKeywordService : Service(), TextToSpeech.OnInitListener {
     }
 
     private fun startSpeechRecognizerListening(bypassWakeWord: Boolean = false) {
+        if (androidx.core.content.ContextCompat.checkSelfPermission(this, android.Manifest.permission.RECORD_AUDIO) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            Log.w("JARVIS_SERVICE", "RECORD_AUDIO permission is not granted yet; deferring speech listener engagement.")
+            return
+        }
         isBypassWakeWord = bypassWakeWord
         serviceScope.launch {
             try {
