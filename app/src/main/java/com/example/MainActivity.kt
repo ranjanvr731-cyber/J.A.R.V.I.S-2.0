@@ -3014,11 +3014,215 @@ fun PersonalProfileMemoriesTab(
     var userProfileSummary by remember { mutableStateOf("") }
     var inputName by remember { mutableStateOf("") }
     var searchRegistryKeyword by remember { mutableStateOf("") }
+    var showAddDialog by remember { mutableStateOf(false) }
+    var editingMemory by remember { mutableStateOf<com.example.data.database.UserMemory?>(null) }
     val coroutineScope = rememberCoroutineScope()
 
     // Reload profile summary on entry
     LaunchedEffect(Unit) {
         userProfileSummary = viewModel.userProfileSystem.compileUserProfileSummary()
+    }
+
+    // Add Memory Dialog Flow
+    if (showAddDialog) {
+        var keyInput by remember { mutableStateOf("") }
+        var valueInput by remember { mutableStateOf("") }
+        var categoryInput by remember { mutableStateOf("preference") }
+        var importanceInput by remember { mutableStateOf("3") }
+
+        AlertDialog(
+            onDismissRequest = { showAddDialog = false },
+            title = {
+                Text(
+                    text = "🧠 ADD NEW MEMORY FACT",
+                    color = JarvisPrimary,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Monospace
+                )
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+                    OutlinedTextField(
+                        value = keyInput,
+                        onValueChange = { keyInput = it },
+                        label = { Text("Memory Key (e.g. Favorite Language)", fontSize = 10.sp) },
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedTextColor = Color.White,
+                            unfocusedTextColor = Color.White,
+                            focusedBorderColor = JarvisPrimary,
+                            unfocusedBorderColor = JarvisSurfaceVariant
+                        )
+                    )
+                    OutlinedTextField(
+                        value = valueInput,
+                        onValueChange = { valueInput = it },
+                        label = { Text("Memory Value (e.g. Kotlin)", fontSize = 10.sp) },
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedTextColor = Color.White,
+                            unfocusedTextColor = Color.White,
+                            focusedBorderColor = JarvisPrimary,
+                            unfocusedBorderColor = JarvisSurfaceVariant
+                        )
+                    )
+                    OutlinedTextField(
+                        value = categoryInput,
+                        onValueChange = { categoryInput = it },
+                        label = { Text("Category (preference, shortcut, protocol, identity)", fontSize = 10.sp) },
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedTextColor = Color.White,
+                            unfocusedTextColor = Color.White,
+                            focusedBorderColor = JarvisPrimary,
+                            unfocusedBorderColor = JarvisSurfaceVariant
+                        )
+                    )
+                    OutlinedTextField(
+                        value = importanceInput,
+                        onValueChange = { importanceInput = it },
+                        label = { Text("Rank / Importance (1 - 5)", fontSize = 10.sp) },
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedTextColor = Color.White,
+                            unfocusedTextColor = Color.White,
+                            focusedBorderColor = JarvisPrimary,
+                            unfocusedBorderColor = JarvisSurfaceVariant
+                        )
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val importance = importanceInput.toIntOrNull()?.coerceIn(1, 5) ?: 3
+                        if (keyInput.isNotBlank() && valueInput.isNotBlank()) {
+                            viewModel.addMemory(java.lang.String(keyInput), java.lang.String(valueInput), java.lang.String(categoryInput), importance)
+                            showAddDialog = false
+                            coroutineScope.launch {
+                                kotlinx.coroutines.delay(200)
+                                userProfileSummary = viewModel.userProfileSystem.compileUserProfileSummary()
+                            }
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = JarvisPrimary)
+                ) {
+                    Text("SAVE FACT", fontSize = 10.sp, color = Color.Black, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+                }
+            },
+            dismissButton = {
+                Button(
+                    onClick = { showAddDialog = false },
+                    colors = ButtonDefaults.buttonColors(containerColor = Color.DarkGray)
+                ) {
+                    Text("CANCEL", fontSize = 10.sp, color = Color.White, fontFamily = FontFamily.Monospace)
+                }
+            },
+            containerColor = Color(0xFF1B1A1E),
+            shape = RoundedCornerShape(12.dp)
+        )
+    }
+
+    // Edit Memory Dialog Flow
+    editingMemory?.let { mem ->
+        var keyInput by remember { mutableStateOf(mem.key) }
+        var valueInput by remember { mutableStateOf(mem.value) }
+        var categoryInput by remember { mutableStateOf(mem.category) }
+        var importanceInput by remember { mutableStateOf(mem.importance.toString()) }
+
+        AlertDialog(
+            onDismissRequest = { editingMemory = null },
+            title = {
+                Text(
+                    text = "✏️ EDIT MEMORY FACT CORE",
+                    color = JarvisSecondary,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Monospace
+                )
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+                    OutlinedTextField(
+                        value = keyInput,
+                        onValueChange = { keyInput = it },
+                        label = { Text("Memory Key", fontSize = 10.sp) },
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedTextColor = Color.White,
+                            unfocusedTextColor = Color.White,
+                            focusedBorderColor = JarvisSecondary,
+                            unfocusedBorderColor = JarvisSurfaceVariant
+                        )
+                    )
+                    OutlinedTextField(
+                        value = valueInput,
+                        onValueChange = { valueInput = it },
+                        label = { Text("Memory Value", fontSize = 10.sp) },
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedTextColor = Color.White,
+                            unfocusedTextColor = Color.White,
+                            focusedBorderColor = JarvisSecondary,
+                            unfocusedBorderColor = JarvisSurfaceVariant
+                        )
+                    )
+                    OutlinedTextField(
+                        value = categoryInput,
+                        onValueChange = { categoryInput = it },
+                        label = { Text("Category", fontSize = 10.sp) },
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedTextColor = Color.White,
+                            unfocusedTextColor = Color.White,
+                            focusedBorderColor = JarvisSecondary,
+                            unfocusedBorderColor = JarvisSurfaceVariant
+                        )
+                    )
+                    OutlinedTextField(
+                        value = importanceInput,
+                        onValueChange = { importanceInput = it },
+                        label = { Text("Rank / Importance (1 - 5)", fontSize = 10.sp) },
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedTextColor = Color.White,
+                            unfocusedTextColor = Color.White,
+                            focusedBorderColor = JarvisSecondary,
+                            unfocusedBorderColor = JarvisSurfaceVariant
+                        )
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val importance = importanceInput.toIntOrNull()?.coerceIn(1, 5) ?: 3
+                        if (keyInput.isNotBlank() && valueInput.isNotBlank()) {
+                            viewModel.updateMemory(mem.id, java.lang.String(keyInput), java.lang.String(valueInput), java.lang.String(categoryInput), importance)
+                            editingMemory = null
+                            coroutineScope.launch {
+                                kotlinx.coroutines.delay(200)
+                                userProfileSummary = viewModel.userProfileSystem.compileUserProfileSummary()
+                            }
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = JarvisSecondary)
+                ) {
+                    Text("UPDATE FACT", fontSize = 10.sp, color = Color.Black, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+                }
+            },
+            dismissButton = {
+                Button(
+                    onClick = { editingMemory = null },
+                    colors = ButtonDefaults.buttonColors(containerColor = Color.DarkGray)
+                ) {
+                    Text("CANCEL", fontSize = 10.sp, color = Color.White, fontFamily = FontFamily.Monospace)
+                }
+            },
+            containerColor = Color(0xFF1B1A1E),
+            shape = RoundedCornerShape(12.dp)
+        )
     }
 
     Column(
@@ -3230,13 +3434,27 @@ fun PersonalProfileMemoriesTab(
         }
 
         // Existing Voice memory storage registries
-        Text(
-            text = "🎙️ INTERVENE MEMORIES REGISTRY",
-            fontSize = 11.sp,
-            fontWeight = FontWeight.Bold,
-            color = JarvisSecondary,
-            fontFamily = FontFamily.Monospace
-        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "🎙️ INTERVENE MEMORIES REGISTRY",
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold,
+                color = JarvisSecondary,
+                fontFamily = FontFamily.Monospace
+            )
+            Button(
+                onClick = { showAddDialog = true },
+                colors = ButtonDefaults.buttonColors(containerColor = JarvisPrimary),
+                shape = RoundedCornerShape(6.dp),
+                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+            ) {
+                Text("+ ADD FACT", fontSize = 9.sp, color = Color.Black, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+            }
+        }
 
         OutlinedTextField(
             value = searchRegistryKeyword,
@@ -3293,13 +3511,26 @@ fun PersonalProfileMemoriesTab(
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(text = "Category: ${mem.category.uppercase()} • Rank: ${mem.importance}/5", fontSize = 9.sp, color = JarvisTextSecondary)
                     }
-                    Button(
-                        onClick = { onDeleteMemory(mem.id) },
-                        colors = ButtonDefaults.buttonColors(containerColor = Color.Red),
-                        shape = RoundedCornerShape(4.dp),
-                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp)
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text("Delete", fontSize = 9.sp, color = Color.White)
+                        Button(
+                            onClick = { editingMemory = mem },
+                            colors = ButtonDefaults.buttonColors(containerColor = JarvisPrimary),
+                            shape = RoundedCornerShape(4.dp),
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp)
+                        ) {
+                            Text("Edit", fontSize = 9.sp, color = Color.Black, fontWeight = FontWeight.Bold)
+                        }
+                        Button(
+                            onClick = { onDeleteMemory(mem.id) },
+                            colors = ButtonDefaults.buttonColors(containerColor = Color.Red),
+                            shape = RoundedCornerShape(4.dp),
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp)
+                        ) {
+                            Text("Delete", fontSize = 9.sp, color = Color.White)
+                        }
                     }
                 }
             }
