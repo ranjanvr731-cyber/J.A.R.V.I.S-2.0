@@ -165,4 +165,126 @@ object JarvisCommandProcessor {
 
     data class MatchedAction(val key: String, val action: String, val type: String)
     data class ProcessedRegistration(val name: String, val action: String, val type: String)
+
+    data class AdaptiveVoiceParams(
+        val pitch: Float,
+        val rate: Float,
+        val styleName: String,
+        val description: String
+    )
+
+    fun determineAdaptiveVoice(prompt: String): AdaptiveVoiceParams {
+        val lower = prompt.lowercase(Locale.US).trim()
+        
+        // 1. Time-of-day check (late night/soft style)
+        val calendar = java.util.Calendar.getInstance()
+        val hour = calendar.get(java.util.Calendar.HOUR_OF_DAY)
+        val isLateNight = hour >= 22 || hour < 6
+
+        // 2. Emotional/Intent Cues
+        val isFrustrated = lower.contains("wrong") || lower.contains("incorrect") || lower.contains("fail") || 
+                           lower.contains("annoyed") || lower.contains("stupid") || lower.contains("useless") || 
+                           lower.contains("shut up") || lower.contains("frustrated") || lower.contains("slow") ||
+                           lower.contains("hate")
+                          
+        val isExcited = lower.contains("awesome") || lower.contains("wow") || lower.contains("great") || 
+                         lower.contains("amazing") || lower.contains("cool") || lower.contains("excit") || 
+                         lower.contains("superb") || lower.contains("love it") || lower.contains("fantastic") || 
+                         lower.endsWith("!") || lower.contains("yes!")
+
+        val isStudying = lower.contains("explain") || lower.contains("study") || lower.contains("learn") || 
+                         lower.contains("solve") || lower.contains("why") || lower.contains("concept") || 
+                         lower.contains("physics") || lower.contains("chemistry") || lower.contains("math") || 
+                         lower.contains("science") || lower.contains("course") || lower.contains("diagram") ||
+                         lower.contains("biology")
+
+        val isQuickQuestion = lower.length < 25 || lower.startsWith("what is") || lower.startsWith("who is") || 
+                               lower.startsWith("time") || lower.startsWith("date") || lower.startsWith("weather") ||
+                               lower.contains("quick") || lower.contains("brief")
+
+        // 3. Selection
+        return when {
+            isFrustrated -> AdaptiveVoiceParams(
+                pitch = 0.82f, // Calm, reassuring, deep
+                rate = 0.88f,  // Deliberate, comforting pace
+                styleName = "Calmed & Clear Resonator",
+                description = "calmed, soothing, professional, clear"
+            )
+            isExcited -> AdaptiveVoiceParams(
+                pitch = 1.22f, // Higher pitch for high energy/enthusiasm
+                rate = 1.10f,  // Fast, exciting cadence
+                styleName = "High-Energy Enthusiast",
+                description = "enthusiastic, rich, high-energy, faster pacing"
+            )
+            isLateNight -> AdaptiveVoiceParams(
+                pitch = 0.90f, // Softer, quiet, warm pitch
+                rate = 0.80f,  // Very cozy, slow, low volume vibe
+                styleName = "Nocturnal Cozy Whisperer",
+                description = "relaxed, late-night, softer, whisperer pace"
+            )
+            isStudying -> AdaptiveVoiceParams(
+                pitch = 1.02f, // Clear, balanced professional tone
+                rate = 0.92f,  // Measured, easy to understand
+                styleName = "Scholarly Instructor",
+                description = "clear, professional style with patient pacing"
+            )
+            isQuickQuestion -> AdaptiveVoiceParams(
+                pitch = 1.10f, // Snappy cadence
+                rate = 1.15f,  // Efficient, high-throughput delivery
+                styleName = "Snappy Fact Delivery",
+                description = "brief, fast pacing, highly efficient"
+            )
+            else -> AdaptiveVoiceParams(
+                pitch = 0.95f, // Dynamic default
+                rate = 1.00f,
+                styleName = "Intuitive Balanced Butler",
+                description = "natural conversational tone"
+            )
+        }
+    }
+
+    fun isExplicitNameRequest(prompt: String): Boolean {
+        val lower = prompt.lowercase(Locale.US)
+        return lower.contains("what is my name") || 
+               lower.contains("say my name") || 
+               lower.contains("who am i") || 
+               lower.contains("do you know my name") ||
+               lower.contains("do you know who i am") ||
+               lower.contains("greet me with my name") ||
+               lower.contains("personalized greeting")
+    }
+
+    fun sanitizeResponseForPrivacy(
+        text: String, 
+        userName: String, 
+        nameUsageEnabled: Boolean, 
+        explicitRequest: Boolean
+    ): String {
+        if (nameUsageEnabled || explicitRequest) {
+            return text
+        }
+        if (userName.isBlank()) return text
+        
+        // Find user name precisely using word boundaries to avoid partial words replacement
+        val escapedName = Regex.escape(userName)
+        val patternWithCommaAndSpaceBefore = Regex(",\\s*$escapedName\\b", RegexOption.IGNORE_CASE)
+        val patternWithSpaceAndCommaAfter = Regex("\\b$escapedName,\\s*", RegexOption.IGNORE_CASE)
+        val patternWithCommaBeforeAtEnd = Regex(",\\s*$escapedName\\s*\\.?", RegexOption.IGNORE_CASE)
+        val patternStandalone = Regex("\\b$escapedName\\b", RegexOption.IGNORE_CASE)
+        
+        var sanitized = text
+        sanitized = sanitized.replace(patternWithCommaAndSpaceBefore, "")
+        sanitized = sanitized.replace(patternWithSpaceAndCommaAfter, "")
+        sanitized = sanitized.replace(patternWithCommaBeforeAtEnd, ".")
+        sanitized = sanitized.replace(patternStandalone, "")
+        
+        // Let's do cleanup of double dots or spaces
+        sanitized = sanitized.replace(Regex("\\s+"), " ")
+        sanitized = sanitized.replace("..", ".")
+        sanitized = sanitized.replace(",.", ".")
+        sanitized = sanitized.replace(" .", ".")
+        sanitized = sanitized.trim()
+        
+        return sanitized
+    }
 }

@@ -50,6 +50,15 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
     val analyticsEngine by lazy { AnalyticsEngine() }
     val automationEngine by lazy { AutomationEngine() }
     val pluginManager by lazy { PluginManager() }
+    val multiAgentCoordinator by lazy { MultiAgentCoordinator(memoryManager, learningEngine, contextManager, automationEngine) }
+
+    // --- Upgraded JARVIS Subsystem Modules ---
+    val stabilitySystem by lazy { StabilitySystem() }
+    val userProfileSystem by lazy { UserProfileSystem(repository) }
+    val taskAgentSystem by lazy { TaskAgentSystem(repository) }
+    val visionAgentSystem by lazy { VisionAgentSystem() }
+    val knowledgeBaseSystem by lazy { KnowledgeBaseSystem() }
+    val proactiveSystem by lazy { ProactiveSystem() }
 
     // Chat history
     val conversationState: StateFlow<List<ConversationMessage>> = repository.allMessages
@@ -96,10 +105,26 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
     private val _isAnalyzingCode = MutableStateFlow(false)
     val isAnalyzingCode: StateFlow<Boolean> = _isAnalyzingCode.asStateFlow()
 
+    private val _nameUsageEnabled = MutableStateFlow(false)
+    val nameUsageEnabled: StateFlow<Boolean> = _nameUsageEnabled.asStateFlow()
+
+    private val _activeVoiceStyle = MutableStateFlow("Intuitive Balanced Butler")
+    val activeVoiceStyle: StateFlow<String> = _activeVoiceStyle.asStateFlow()
+
+    private val _activeVoiceDesc = MutableStateFlow("natural conversational tone")
+    val activeVoiceDesc: StateFlow<String> = _activeVoiceDesc.asStateFlow()
+
     init {
         // Pre-populate database with a friendly greeting if empty
         viewModelScope.launch {
             conversationState.first { true } // wait for initial list
+            try {
+                val savedMemories = repository.allMemories.first()
+                val savedNameUsage = savedMemories.firstOrNull { it.key == "name_usage_enabled" }?.value
+                _nameUsageEnabled.value = (savedNameUsage == "true")
+            } catch (e: Exception) {
+                Log.e("JARVIS_VM", "Failed to load name privacy configuration on startup", e)
+            }
             if (conversationState.value.isEmpty()) {
                 val greeting = ConversationMessage(
                     sender = "JARVIS",
@@ -158,26 +183,63 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
 
             var responseText = ""
 
-            // 5. Check offline status vs online hybrid AI, and dynamic rules
-            val isOnline = selfDiagnosticSystem.runDiagnosticCheck().isNetworkAvailable
-            val matchedAutomation = automationEngine.findAutomationAction(resolvedText)
-            val matchedPlugin = pluginManager.processPluginKeyword(resolvedText)
+            // 5. Intercept for Smart Task/Reminder Scheduling
+            val lowerText = resolvedText.lowercase()
+            if (lowerText.contains("remind") || 
+                lowerText.contains("reminder") || 
+                lowerText.contains("schedule") || 
+                lowerText.contains("task") || 
+                lowerText.contains("todo") || 
+                lowerText.contains("alarm") || 
+                lowerText.contains("every monday") || 
+                lowerText.contains("wake me up") || 
+                lowerText.contains("plan my day") || 
+                lowerText.contains("cancel my") || 
+                lowerText.contains("delete my") || 
+                lowerText.contains("remove my") || 
+                lowerText.contains("tell me to") || 
+                lowerText.contains("clear all reminders")
+            ) {
+                try {
+                    responseText = taskAgentSystem.parseAndRegisterTask(resolvedText)
+                } catch (e: Exception) {
+                    stabilitySystem.trackError("VOICE", "Failed parsing task schedule: ${e.localizedMessage}")
+                    responseText = "I had a minor syntax lag in my schedule queues, Bro. But let me try to process it as a general conversation!"
+                }
+            }
 
-            if (matchedAutomation != null) {
-                responseText = "Executing automated sequence: $matchedAutomation. All systems aligned, Bro! [PROTOCOL:$matchedAutomation]"
-            } else if (matchedPlugin != null) {
-                responseText = matchedPlugin
-            } else if (!isOnline) {
-                // FALLBACK TO OFFLINE AI ENGINES
-                responseText = offlineAIManager.processOfflineQuery(resolvedText)
-            } else {
-                // ONLINE CLOUD GEN AI PIPELINE
-                val history = conversationState.value.takeLast(10)
-                val geminiPrompt = buildPromptWithContext(resolvedText, history)
-                responseText = callGeminiAPI(geminiPrompt)
-                
-                // Cache online reply for offline resilience
-                offlineAIManager.cacheReponse(resolvedText, responseText)
+            if (responseText.isBlank()) {
+                // Check for Proactive Habit Triggers
+                val habitSuggestion = userProfileSystem.auditActionForHabitTrigger(resolvedText)
+                if (habitSuggestion != null) {
+                    responseText = habitSuggestion
+                } else {
+                    // Check offline status vs online hybrid AI, and dynamic rules
+                    val isOnline = selfDiagnosticSystem.runDiagnosticCheck().isNetworkAvailable
+                    val matchedPlugin = pluginManager.processPluginKeyword(resolvedText)
+
+                    if (matchedPlugin != null) {
+                        responseText = matchedPlugin
+                    } else {
+                        try {
+                            val fallback = offlineAIManager.processOfflineQuery(resolvedText)
+                            responseText = multiAgentCoordinator.coordinateBrainDecision(
+                                query = resolvedText,
+                                isOnline = isOnline,
+                                fallbackResponse = fallback
+                            ) { promptText ->
+                                val history = conversationState.value.takeLast(10)
+                                val geminiPrompt = buildPromptWithContext(promptText, history)
+                                val cloudResp = callGeminiAPI(geminiPrompt)
+                                offlineAIManager.cacheReponse(resolvedText, cloudResp)
+                                cloudResp
+                            }
+                        } catch (e: Exception) {
+                            stabilitySystem.trackError("API", "Brain collaboration error: ${e.localizedMessage}")
+                            responseText = "Hey Bro, my logical circuits experienced an anomaly. Proceeding in backup diagnostic safe-mode!"
+                        }
+                    }
+                }
             }
 
             _isThinking.value = false
@@ -193,15 +255,40 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
             )
             repository.insertMessage(jarvisMsg)
 
-            // 8. Voice Resonance & Emotion adaptation
+            // 8. Voice Resonance & Emotion adaptation / Dynamic Automatic Acoustic Voice Adaptation
             val voiceEmotion = voiceManager.parseEmotionFromResponse(augmentedResponse)
             Log.d("JARVIS_VOICE", "Voice style tone tuned to: ${voiceEmotion.name}")
+
+            // Determine active voice styling based on context/intent of text prompt
+            val voiceParams = JarvisCommandProcessor.determineAdaptiveVoice(text)
+            _activeVoiceStyle.value = voiceParams.styleName
+            _activeVoiceDesc.value = voiceParams.description
+            
+            // Persist the automated parameters securely so TTS system picks them up
+            repository.deleteMemoryByKey("voice_pitch")
+            repository.deleteMemoryByKey("voice_rate")
+            repository.insertMemory(UserMemory(key = "voice_pitch", value = voiceParams.pitch.toString(), category = "voice_settings"))
+            repository.insertMemory(UserMemory(key = "voice_rate", value = voiceParams.rate.toString(), category = "voice_settings"))
 
             // 9. Trigger Text To Speech
             if (isVoice || backgroundListeningEnabled.value) {
                 val speakableText = augmentedResponse.replace(Regex("```[a-zA-Z]*\\n[\\s\\S]*?\\n```"), "[Code snapshot has been compiled on screen]")
                 _isSpeaking.value = true
-                _speakEvent.emit(speakableText)
+                
+                // Privacy-first name sanitization checks
+                val activeMemories = memoriesState.value
+                val userName = activeMemories.firstOrNull { 
+                    it.key.lowercase().contains("user name") || it.key.lowercase() == "user_name"
+                }?.value ?: "Ranjan"
+                val explicit = JarvisCommandProcessor.isExplicitNameRequest(text)
+                val finalSpeakable = JarvisCommandProcessor.sanitizeResponseForPrivacy(
+                    speakableText, 
+                    userName, 
+                    _nameUsageEnabled.value, 
+                    explicit
+                )
+                
+                _speakEvent.emit(finalSpeakable)
             }
 
             // 10. Learn from User Corrections proactively
@@ -425,6 +512,15 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         _automationLogs.value = currentLogs.take(20)
     }
 
+    fun setNameUsageEnabled(enabled: Boolean) {
+        _nameUsageEnabled.value = enabled
+        viewModelScope.launch {
+            repository.deleteMemoryByKey("name_usage_enabled")
+            repository.insertMemory(UserMemory(key = "name_usage_enabled", value = enabled.toString(), category = "preference"))
+            addLog("Privacy Settings: Name Usage ${if (enabled) "ENABLED" else "DISABLED"}")
+        }
+    }
+
     fun updateUserName(name: String) {
         viewModelScope.launch {
             repository.deleteMemoryByKey("User Name")
@@ -462,6 +558,15 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     // --- Gemini Network REST Logic ---
+
+    fun queryGeminiDirectly(prompt: String, onResult: (String) -> Unit) {
+        viewModelScope.launch {
+            _isThinking.value = true
+            val resp = callGeminiAPI(prompt)
+            _isThinking.value = false
+            onResult(resp)
+        }
+    }
 
     private suspend fun callGeminiAPI(prompt: String, systemInstruction: String? = null): String = withContext(Dispatchers.IO) {
         val apiKey = com.example.data.network.GoogleApiKeyProvider.getApiKey()

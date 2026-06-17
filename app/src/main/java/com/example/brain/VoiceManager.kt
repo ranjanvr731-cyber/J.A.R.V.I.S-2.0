@@ -7,46 +7,88 @@ import java.util.Locale
 class VoiceManager {
     private val TAG = "JarvisVoiceManager"
     
-    // Emotion settings that map to speech parameters
-    enum class EmotionMode(val pitch: Float, val speechRate: Float) {
-        snappy(1.15f, 1.25f),     // Standard crisp, energetic Jarvis
-        casual(1.0f, 1.15f),     // Friendly, conversational
-        excited(1.25f, 1.35f),   // Highly collaborative, higher pitch and faster pace
-        thoughtful(0.85f, 0.95f),// Soft tone for code explanation or debugging
-        security(1.05f, 1.3f)    // Rapid alert tone
+    // Multi-emotional states conforming exactly to requirements
+    enum class EmotionMode(val displayName: String, val pitch: Float, val speechRate: Float) {
+        HAPPY("Happy", 1.2f, 1.2f),
+        SAD("Sad", 0.85f, 0.9f),
+        ANGRY("Angry", 1.1f, 1.4f),
+        EXCITED("Excited", 1.3f, 1.35f),
+        NEUTRAL("Neutral", 1.0f, 1.15f),
+        STRESSED("Stressed", 1.15f, 1.25f)
     }
 
-    private var currentEmotion = EmotionMode.snappy
+    private var currentEmotion = EmotionMode.NEUTRAL
+    private val speechQueue = mutableListOf<String>()
+    private var isCurrentlySpeaking = false
 
-    // Get the pitch for the current emotion
+    // State query metrics
     fun getPitch(): Float = currentEmotion.pitch
-
-    // Get the speech rate for the current emotion
     fun getSpeechRate(): Float = currentEmotion.speechRate
+    fun getActiveEmotion(): EmotionMode = currentEmotion
 
-    // Identify and update emotional tone from output sentiment
-    fun parseEmotionFromResponse(text: String): EmotionMode {
+    // Detects user emotional state from input message and adjusts speaking resonators
+    fun detectEmotionFromInput(text: String): EmotionMode {
         val lower = text.lowercase(Locale.US)
         currentEmotion = when {
-            lower.contains("alert") || lower.contains("warning") || lower.contains("danger") || lower.contains("unauthorized") -> EmotionMode.security
-            lower.contains("explain") || lower.contains("analyze") || lower.contains("diagnose") || lower.contains("compiling") -> EmotionMode.thoughtful
-            lower.contains("excited") || lower.contains("awesome") || lower.contains("magnificent") || lower.contains("super") -> EmotionMode.excited
-            lower.contains("casual") || lower.contains("chill") || lower.contains("bro") -> EmotionMode.casual
-            else -> EmotionMode.snappy
+            lower.contains("happy") || lower.contains("great") || lower.contains("good") || lower.contains("glad") || lower.contains("superb") -> EmotionMode.HAPPY
+            lower.contains("sad") || lower.contains("bad") || lower.contains("sorry") || lower.contains("hurt") || lower.contains("cry") -> EmotionMode.SAD
+            lower.contains("angry") || lower.contains("hate") || lower.contains("stupid") || lower.contains("rubbish") || lower.contains("annoyed") -> EmotionMode.ANGRY
+            lower.contains("excited") || lower.contains("wow") || lower.contains("awesome") || lower.contains("wonderful") -> EmotionMode.EXCITED
+            lower.contains("stress") || lower.contains("worry") || lower.contains("anxious") || lower.contains("scared") || lower.contains("help") -> EmotionMode.STRESSED
+            else -> EmotionMode.NEUTRAL
         }
-        Log.d(TAG, "Assessed text tone mood mapping: $currentEmotion")
+        Log.i(TAG, "Assessed human conversational sentiment state matches: ${currentEmotion.displayName} (Tuning voice envelope pitch=${currentEmotion.pitch}x, rate=${currentEmotion.speechRate}x)")
         return currentEmotion
     }
 
-    // Configure a TTS engine instance using current parameters
+    // Identifies dynamic speaking tone parameters
+    fun parseEmotionFromResponse(text: String): EmotionMode {
+        return detectEmotionFromInput(text)
+    }
+
+    // Thread-safe response queuing to prevent speech interruption bugs and overlap
+    fun queueSpeech(text: String) {
+        synchronized(speechQueue) {
+            speechQueue.add(text)
+            Log.d(TAG, "Enqueued speech utterance: '${text.take(30)}...'. Current queue size: ${speechQueue.size}")
+        }
+    }
+
+    fun popNextSpeech(): String? {
+        synchronized(speechQueue) {
+            if (speechQueue.isNotEmpty()) {
+                val next = speechQueue.removeAt(0)
+                isCurrentlySpeaking = true
+                return next
+            }
+            isCurrentlySpeaking = false
+            return null
+        }
+    }
+
+    fun clearSpeechQueue() {
+        synchronized(speechQueue) {
+            speechQueue.clear()
+            isCurrentlySpeaking = false
+            Log.i(TAG, "Speech queue fully purged to handle direct interrupt protocol.")
+        }
+    }
+
+    fun setSpeakingStatus(status: Boolean) {
+        isCurrentlySpeaking = status
+    }
+
+    fun isSpeakingNow(): Boolean = isCurrentlySpeaking
+
+    // Safe, fluent speech configuration engine
     fun configureTts(tts: TextToSpeech) {
         try {
             tts.setLanguage(Locale.US)
             tts.setPitch(currentEmotion.pitch)
             tts.setSpeechRate(currentEmotion.speechRate)
-            Log.d(TAG, "Applied pitch=${currentEmotion.pitch}, rate=${currentEmotion.speechRate} to engine.")
+            Log.d(TAG, "Successfully configured speech resonators: pitch=${currentEmotion.pitch}, rate=${currentEmotion.speechRate}")
         } catch (e: Exception) {
-            Log.e(TAG, "Error applying dynamic vocal resonators: ", e)
+            Log.e(TAG, "Failed to apply dynamic voice configurations cleanly: ", e)
         }
     }
 }

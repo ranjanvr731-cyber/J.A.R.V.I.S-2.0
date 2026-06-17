@@ -28,6 +28,9 @@ import androidx.activity.viewModels
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -64,6 +67,7 @@ import com.example.data.database.ConversationMessage
 import com.example.data.database.UserMemory
 import com.example.ui.theme.*
 import com.example.ui.viewmodel.JarvisViewModel
+import kotlinx.coroutines.launch
 import java.util.Locale
 
 class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
@@ -81,6 +85,9 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
         if (recordGranted || originalState) {
             viewModel.addLog("Telemetry Check: Audio Capture Permission ACTIVE")
             initializeSpeechRecognizer()
+            if (viewModel.handsFreeEnabled.value) {
+                startKeywordService()
+            }
         } else {
             viewModel.addLog("Telemetry Warning: Audio Capture Permission DENIED")
         }
@@ -182,7 +189,33 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
                 Log.e("JARVIS", "Failed to modulate acoustic voice parameters", e)
             }
 
-            tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "jarvis_session")
+            // Name Privacy sanitization in voice responses
+            val userName = memories.firstOrNull { 
+                it.key.lowercase().contains("user name") || it.key.lowercase() == "user_name"
+            }?.value ?: "Ranjan"
+            val lastUserMsg = viewModel.conversationState.value.lastOrNull { it.sender == "USER" }?.text ?: ""
+            val explicit = com.example.service.JarvisCommandProcessor.isExplicitNameRequest(lastUserMsg)
+            val nameUsageEnabled = viewModel.nameUsageEnabled.value
+
+            val sanitizedText = com.example.service.JarvisCommandProcessor.sanitizeResponseForPrivacy(
+                text,
+                userName,
+                nameUsageEnabled,
+                explicit
+            )
+
+            try {
+                tts?.speak(sanitizedText, TextToSpeech.QUEUE_FLUSH, null, "jarvis_session")
+            } catch (e: Exception) {
+                Log.e("JARVIS", "TTS Session crash recovered, fallback to default", e)
+                try {
+                    tts?.setPitch(1.0f)
+                    tts?.setSpeechRate(1.0f)
+                    tts?.speak(sanitizedText, TextToSpeech.QUEUE_FLUSH, null, "jarvis_session")
+                } catch (err: Exception) {
+                    Log.e("JARVIS", "TTS Critical fallback failed entirely.", err)
+                }
+            }
         } else {
             Toast.makeText(this, "Speech synthesis not ready yet.", Toast.LENGTH_SHORT).show()
         }
@@ -208,7 +241,7 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
         runOnUiThread {
             try {
                 if (android.speech.SpeechRecognizer.isRecognitionAvailable(this)) {
-                    speechRecognizer = android.speech.SpeechRecognizer.createSpeechRecognizer(this).apply {
+                    speechRecognizer = android.speech.SpeechRecognizer.createSpeechRecognizer(applicationContext).apply {
                         setRecognitionListener(object : android.speech.RecognitionListener {
                             override fun onReadyForSpeech(params: Bundle?) {
                                 Log.d("JARVIS", "SpeechRecognizer Ready")
@@ -507,6 +540,10 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
 
     fun startKeywordService() {
         runOnUiThread {
+            if (androidx.core.content.ContextCompat.checkSelfPermission(this, android.Manifest.permission.RECORD_AUDIO) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                viewModel.addLog("Background Service: Deferring initialization until RECORD_AUDIO is granted.")
+                return@runOnUiThread
+            }
             try {
                 if (speechRecognizer != null) {
                     speechRecognizer?.cancel()
@@ -570,6 +607,11 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
     // Native Speech to Text Launcher helper
     fun startSpeechToText() {
         runOnUiThread {
+            if (androidx.core.content.ContextCompat.checkSelfPermission(this, android.Manifest.permission.RECORD_AUDIO) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                Toast.makeText(this, "Microphone permission is required to listen.", Toast.LENGTH_SHORT).show()
+                requestPermissionsLauncher.launch(arrayOf(android.Manifest.permission.RECORD_AUDIO))
+                return@runOnUiThread
+            }
             if (com.example.service.JarvisKeywordService.isServiceRunning) {
                 com.example.service.JarvisKeywordService.instance?.startSpeechToTextDirectly()
                 return@runOnUiThread
@@ -913,15 +955,16 @@ fun JarvisDashboardScreen(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(vertical = 8.dp, horizontal = 16.dp),
+                        .padding(vertical = 8.dp, horizontal = 12.dp),
                     horizontalArrangement = Arrangement.SpaceAround,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     val tabs = listOf(
-                        Triple(0, "CHAT", Icons.Default.PlayArrow), // representing console
-                        Triple(1, "CODING", Icons.Default.List), // representing L&D suite
-                        Triple(2, "VOICE MEM", Icons.Default.Info), // representing Memory
-                        Triple(3, "AUTOM", Icons.Default.Settings) // representing logs/automation
+                        Triple(0, "CHAT", Icons.Default.PlayArrow), // Main Voice Console
+                        Triple(1, "VISION AI", Icons.Default.Search), // Optics Study Helper
+                        Triple(2, "SCHEDULE", Icons.Default.List), // Tasks & Knowledge Base
+                        Triple(3, "MEMORIES", Icons.Default.Info), // Profile & Memories List
+                        Triple(4, "SYSTEM", Icons.Default.Settings) // Collaborative multi-agents, Watchdogs & Plugins
                     )
                     tabs.forEach { (index, title, icon) ->
                         val isSelected = activeTab == index
@@ -929,7 +972,7 @@ fun JarvisDashboardScreen(
                             modifier = Modifier
                                 .clip(RoundedCornerShape(12.dp))
                                 .clickable { activeTab = index }
-                                .padding(vertical = 8.dp, horizontal = 12.dp)
+                                .padding(vertical = 6.dp, horizontal = 10.dp)
                                 .testTag("tab_$index"),
                             horizontalAlignment = Alignment.CenterHorizontally
                         ) {
@@ -941,7 +984,7 @@ fun JarvisDashboardScreen(
                             )
                             Text(
                                 text = title,
-                                fontSize = 10.sp,
+                                fontSize = 9.sp,
                                 fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
                                 color = if (isSelected) JarvisPrimary else JarvisTextSecondary,
                                 fontFamily = FontFamily.Monospace
@@ -1040,16 +1083,19 @@ fun JarvisDashboardScreen(
                         onToggleListening = { viewModel.setBackgroundListening(!backgroundListening) },
                         onToggleHandsFree = { viewModel.setHandsFreeEnabled(!handsFreeEnabled) }
                     )
-                    1 -> CodeSuiteTab(
-                        isAnalyzing = isAnalyzingCode,
-                        analysisResult = parseResult,
-                        onAnalyze = { code, mode -> viewModel.analyzeCode(code, mode) }
+                    1 -> AdvancedVisionStudyTab(
+                        viewModel = viewModel
                     )
-                    2 -> CognitiveBankTab(
+                    2 -> SmartSchedulerTab(
+                        viewModel = viewModel
+                    )
+                    3 -> PersonalProfileMemoriesTab(
+                        viewModel = viewModel,
                         memories = memories,
                         onDeleteMemory = { id -> viewModel.deleteMemory(id) }
                     )
-                    3 -> AutomationSystemTab(
+                    4 -> SystemDiagnosticsTab(
+                        viewModel = viewModel,
                         logs = automationLogs
                     )
                 }
@@ -1688,10 +1734,45 @@ fun CognitiveBankTab(
             }
         }
 
-        Spacer(modifier = Modifier.height(6.dp))
+        Spacer(modifier = Modifier.height(4.dp))
+
+        var searchQuery by remember { mutableStateOf("") }
+        val filteredList = remember(memories, searchQuery) {
+            if (searchQuery.isBlank()) {
+                memories
+            } else {
+                memories.filter {
+                    it.key.contains(searchQuery, ignoreCase = true) ||
+                    it.value.contains(searchQuery, ignoreCase = true) ||
+                    it.category.contains(searchQuery, ignoreCase = true)
+                }
+            }
+        }
+
+        OutlinedTextField(
+            value = searchQuery,
+            onValueChange = { searchQuery = it },
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(bottom = 12.dp)
+                .testTag("memory_search_field"),
+            placeholder = { Text("Search memories, commands, keys...", color = JarvisTextSecondary, fontSize = 11.sp) },
+            leadingIcon = { Icon(Icons.Default.Search, contentDescription = "Search Memories", tint = JarvisPrimary) },
+            singleLine = true,
+            colors = OutlinedTextFieldDefaults.colors(
+                focusedBorderColor = JarvisPrimary,
+                unfocusedBorderColor = JarvisSurfaceVariant,
+                focusedLabelColor = JarvisPrimary,
+                unfocusedLabelColor = JarvisTextSecondary,
+                focusedTextColor = JarvisTextPrimary,
+                unfocusedTextColor = JarvisTextPrimary,
+                cursorColor = JarvisPrimary
+            ),
+            shape = RoundedCornerShape(12.dp)
+        )
 
         Text(
-            text = "ACTIVE VOICE MEMORY SYNC REGISTRY",
+            text = "ACTIVE VOICE MEMORY SYNC REGISTRY (${filteredList.size})",
             fontSize = 10.sp,
             fontWeight = FontWeight.Bold,
             color = JarvisTextSecondary,
@@ -1700,7 +1781,7 @@ fun CognitiveBankTab(
         )
 
         // Memory registers list
-        if (memories.isEmpty()) {
+        if (filteredList.isEmpty()) {
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -1710,7 +1791,7 @@ fun CognitiveBankTab(
                 contentAlignment = Alignment.Center
             ) {
                 Text(
-                    text = "No vocal registries logged. Say 'Hey Jarvis, remember command ...' to populate.",
+                    text = if (searchQuery.isNotBlank()) "No search matches for '$searchQuery'" else "No vocal registries logged. Say 'Hey Jarvis, remember command ...' to populate.",
                     color = JarvisTextSecondary,
                     fontSize = 11.sp,
                     fontFamily = FontFamily.Monospace,
@@ -1725,7 +1806,7 @@ fun CognitiveBankTab(
                     .weight(1f),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                items(memories) { mem ->
+                items(filteredList) { mem ->
                     Card(
                         modifier = Modifier.fillMaxWidth(),
                         colors = CardDefaults.cardColors(containerColor = JarvisSurface),
@@ -1801,8 +1882,28 @@ fun CognitiveBankTab(
 // =================== AUTOMATION LOGS TAB ===================
 @Composable
 fun AutomationSystemTab(
+    viewModel: JarvisViewModel,
     logs: List<String>
 ) {
+    var diagnosticState by remember { mutableStateOf(viewModel.selfDiagnosticSystem.runDiagnosticCheck()) }
+    var securityReport by remember { mutableStateOf(viewModel.securityManager.generateSecurityReport()) }
+    var behaviorProfile by remember { mutableStateOf(viewModel.learningEngine.compileUserBehaviorProfile()) }
+    val agents = remember { viewModel.multiAgentCoordinator.getAgentsList() }
+    
+    // Vision system simulation states
+    val mockVisionTargets = listOf(
+        "Standard Code Snapshot Workspace",
+        "System Log Metrics Stack Chart",
+        "Device Homescreen Permission Grid",
+        "Custom Sandbox Terminal Prompt"
+    )
+    var selectedVisionTarget by remember { mutableStateOf(mockVisionTargets[0]) }
+    var customVisionInput by remember { mutableStateOf("") }
+    var visionAnalysisResult by remember { mutableStateOf<String?>(null) }
+    var isAnalyzingVision by remember { mutableStateOf(false) }
+
+    val coroutineScope = rememberCoroutineScope()
+
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
@@ -1812,7 +1913,7 @@ fun AutomationSystemTab(
         // Highlighting Voice-Only Hands-Free Capability
         item {
             Card(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier.fillMaxWidth().testTag("handsfree_voice_card"),
                 colors = CardDefaults.cardColors(containerColor = JarvisSurface),
                 border = BorderStroke(1.dp, JarvisPrimary)
             ) {
@@ -1826,7 +1927,7 @@ fun AutomationSystemTab(
                     )
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
-                        text = "The entire system is responsive 100% via background voice wake-word triggers. Simply speak 'Hey Jarvis' or just wake-word followed by any protocol or command. No manual clicks required!",
+                        text = "The entire system is responsive 100% via background voice wake-word triggers. Simply speak 'Hey Jarvis' or just wake-word followed by any protocol or command.",
                         color = JarvisTextSecondary,
                         fontSize = 11.sp,
                         lineHeight = 15.sp
@@ -1886,12 +1987,421 @@ fun AutomationSystemTab(
             }
         }
 
-        // Active Logs Terminal Panel
+        // COLLABORATIVE MULTI-AGENT STATE MONITOR
+        item {
+            Card(
+                modifier = Modifier.fillMaxWidth().testTag("multi_agent_monitor_card"),
+                colors = CardDefaults.cardColors(containerColor = JarvisSurface),
+                border = BorderStroke(1.dp, JarvisSurfaceVariant)
+            ) {
+                Column(modifier = Modifier.padding(14.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "🤖 COLLABORATIVE MULTI-AGENT CORRELATOR",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = JarvisSecondary,
+                            fontFamily = FontFamily.Monospace
+                        )
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(4.dp))
+                                .background(JarvisPrimary.copy(alpha = 0.2f))
+                                .padding(horizontal = 6.dp, vertical = 2.dp)
+                        ) {
+                            Text(
+                                text = "5 CORES SYNCED",
+                                fontSize = 8.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = JarvisPrimary,
+                                fontFamily = FontFamily.Monospace
+                            )
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Divider(color = JarvisSurfaceVariant)
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    agents.forEach { agent ->
+                        Column(modifier = Modifier.padding(vertical = 6.dp)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "🌐 ${agent.agentName}",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = JarvisTextPrimary,
+                                    fontFamily = FontFamily.Monospace
+                                )
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(4.dp))
+                                        .background(
+                                            when(agent.activeState) {
+                                                com.example.brain.MultiAgentCoordinator.AgentState.IDLE -> Color.Gray.copy(alpha = 0.2f)
+                                                else -> JarvisPrimary.copy(alpha = 0.2f)
+                                            }
+                                        )
+                                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                                ) {
+                                    Text(
+                                        text = agent.activeState.name,
+                                        fontSize = 8.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = when(agent.activeState) {
+                                            com.example.brain.MultiAgentCoordinator.AgentState.IDLE -> Color.Gray
+                                            else -> JarvisPrimary
+                                        },
+                                        fontFamily = FontFamily.Monospace
+                                    )
+                                }
+                            }
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = agent.description,
+                                fontSize = 10.sp,
+                                color = JarvisTextSecondary
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = "Task Status: ${agent.statusReport}",
+                                fontSize = 10.sp,
+                                color = JarvisSecondary,
+                                fontFamily = FontFamily.Monospace,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Divider(color = JarvisSurfaceVariant.copy(alpha = 0.5f))
+                        }
+                    }
+                }
+            }
+        }
+
+        // VISION SYSTEM SIMULATOR & TEXT READING (OCR)
+        item {
+            Card(
+                modifier = Modifier.fillMaxWidth().testTag("vision_system_card"),
+                colors = CardDefaults.cardColors(containerColor = JarvisSurface),
+                border = BorderStroke(1.dp, JarvisSurfaceVariant)
+            ) {
+                Column(modifier = Modifier.padding(14.dp)) {
+                    Text(
+                        text = "👁️ J.A.R.V.I.S VISION ENVELOPE (OCR)",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = JarvisSecondary,
+                        fontFamily = FontFamily.Monospace
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "Target image arrays on disk or captured screenshot streams. Pick a neural scanning vector context to feed into live analysis matrices:",
+                        fontSize = 10.5.sp,
+                        color = JarvisTextSecondary,
+                        lineHeight = 15.sp
+                    )
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    // Scan targets select pills
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        mockVisionTargets.take(2).forEach { tgt ->
+                            val isSelected = selectedVisionTarget == tgt
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(if (isSelected) JarvisPrimary else JarvisSurfaceVariant)
+                                    .border(1.dp, if (isSelected) Color.Transparent else JarvisSurfaceVariant, RoundedCornerShape(8.dp))
+                                    .clickable { selectedVisionTarget = tgt }
+                                    .padding(vertical = 6.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = tgt.substringBefore(" "),
+                                    fontSize = 10.sp,
+                                    color = if (isSelected) Color.Black else JarvisTextPrimary,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        mockVisionTargets.drop(2).forEach { tgt ->
+                            val isSelected = selectedVisionTarget == tgt
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(if (isSelected) JarvisPrimary else JarvisSurfaceVariant)
+                                    .border(1.dp, if (isSelected) Color.Transparent else JarvisSurfaceVariant, RoundedCornerShape(8.dp))
+                                    .clickable { selectedVisionTarget = tgt }
+                                    .padding(vertical = 6.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = tgt.substringBefore(" "),
+                                    fontSize = 10.sp,
+                                    color = if (isSelected) Color.Black else JarvisTextPrimary,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(12.dp))
+                    OutlinedTextField(
+                        value = customVisionInput,
+                        onValueChange = { customVisionInput = it },
+                        modifier = Modifier.fillMaxWidth().testTag("custom_vision_prompt_input"),
+                        placeholder = { Text("Describe specific image context or enter OCR details...", fontSize = 11.sp, color = JarvisTextSecondary) },
+                        singleLine = true,
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = JarvisPrimary,
+                            unfocusedBorderColor = JarvisSurfaceVariant,
+                            focusedTextColor = JarvisTextPrimary,
+                            unfocusedTextColor = JarvisTextPrimary
+                        ),
+                        shape = RoundedCornerShape(8.dp)
+                    )
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    Button(
+                        onClick = {
+                            isAnalyzingVision = true
+                            visionAnalysisResult = null
+                            coroutineScope.launch {
+                                val visionTextPrompt = "You are JARVIS, compiling OCR details for selected mock visual camera targets: '$selectedVisionTarget'. Custom parameters context: '$customVisionInput'. Read all texts inside the image, analyze layouts, find objects, and present in a detailed, exciting, movie-realistic J.A.R.V.I.S science report format, using CASUAL witty Tanglish/English style."
+                                // Call model dynamically
+                                try {
+                                    val apiResult = viewModel.multiAgentCoordinator.coordinateBrainDecision(
+                                        query = visionTextPrompt,
+                                        isOnline = viewModel.selfDiagnosticSystem.runDiagnosticCheck().isNetworkAvailable,
+                                        fallbackResponse = "Offline OCR loop completed: Extracted layout elements from '$selectedVisionTarget' locally."
+                                    ) { prompt ->
+                                        // Dynamic API call
+                                        val request = com.example.data.network.GenerateContentRequest(
+                                            contents = listOf(com.example.data.network.Content(parts = listOf(com.example.data.network.Part(text = prompt)))),
+                                            generationConfig = com.example.data.network.GenerationConfig(temperature = 0.5)
+                                        )
+                                        val key = com.example.data.network.GoogleApiKeyProvider.getApiKey()
+                                        val resp = com.example.data.network.RetrofitClient.service.generateContent(key, request)
+                                        resp.candidates?.firstOrNull()?.content?.parts?.firstOrNull()?.text ?: "Connection empty."
+                                    }
+                                    visionAnalysisResult = apiResult
+                                } catch (e: Exception) {
+                                    visionAnalysisResult = "Calibration failed: ${e.localizedMessage}"
+                                } finally {
+                                    isAnalyzingVision = false
+                                }
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth().testTag("vision_analyze_button"),
+                        colors = ButtonDefaults.buttonColors(containerColor = JarvisPrimary),
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        if (isAnalyzingVision) {
+                            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = Color.Black)
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("SCANNING TEXT...", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color.Black)
+                        } else {
+                            Text("LAUNCH SCRANNER DISPATCH", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color.Black)
+                        }
+                    }
+
+                    visionAnalysisResult?.let { result ->
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(Color(0xFF100F12), RoundedCornerShape(8.dp))
+                                .border(1.dp, JarvisPrimary.copy(alpha = 0.3f), RoundedCornerShape(8.dp))
+                                .padding(12.dp)
+                        ) {
+                            Text(
+                                text = result,
+                                color = JarvisTextPrimary,
+                                fontSize = 11.sp,
+                                fontFamily = FontFamily.Monospace,
+                                lineHeight = 15.sp
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        // TELEMETRY & SYSTEM DIAGNOSTICS
+        item {
+            Card(
+                modifier = Modifier.fillMaxWidth().testTag("system_diagnostics_card"),
+                colors = CardDefaults.cardColors(containerColor = JarvisSurface),
+                border = BorderStroke(1.dp, JarvisSurfaceVariant)
+            ) {
+                Column(modifier = Modifier.padding(14.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "🔧 SYSTEM HEALTH SWEEP SCAN",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = JarvisSecondary,
+                            fontFamily = FontFamily.Monospace
+                        )
+                        IconButton(
+                            onClick = {
+                                diagnosticState = viewModel.selfDiagnosticSystem.runDiagnosticCheck()
+                                behaviorProfile = viewModel.learningEngine.compileUserBehaviorProfile()
+                                securityReport = viewModel.securityManager.generateSecurityReport()
+                            },
+                            modifier = Modifier.size(24.dp).testTag("refresh_diag_button")
+                        ) {
+                            Icon(Icons.Default.Refresh, contentDescription = "Refresh Health Grid", tint = JarvisPrimary, modifier = Modifier.size(16.dp))
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Divider(color = JarvisSurfaceVariant)
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    Text(
+                        text = diagnosticState.reports,
+                        color = JarvisTextPrimary,
+                        fontSize = 11.sp,
+                        fontFamily = FontFamily.Monospace,
+                        lineHeight = 16.sp
+                    )
+
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Divider(color = JarvisSurfaceVariant.copy(alpha = 0.5f))
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text("RAM FOOTPRINT", fontSize = 10.sp, color = JarvisTextSecondary, fontFamily = FontFamily.Monospace)
+                        Text(diagnosticState.currentRamFootprint, fontSize = 10.sp, color = JarvisPrimary, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold)
+                    }
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text("BATTERY STANDBY PROFILE", fontSize = 10.sp, color = JarvisTextSecondary, fontFamily = FontFamily.Monospace)
+                        Text(diagnosticState.batteryDrainRate, fontSize = 10.sp, color = JarvisSecondary, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+        }
+
+        // USER BEHAVIOR PROFILE INDICES
+        item {
+            Card(
+                modifier = Modifier.fillMaxWidth().testTag("behavior_profile_card"),
+                colors = CardDefaults.cardColors(containerColor = JarvisSurface),
+                border = BorderStroke(1.dp, JarvisSurfaceVariant)
+            ) {
+                Column(modifier = Modifier.padding(14.dp)) {
+                    Text(
+                        text = "🧠 COGNITIVE LEARNING METRIC DESK",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = JarvisSecondary,
+                        fontFamily = FontFamily.Monospace
+                    )
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Divider(color = JarvisSurfaceVariant)
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    Text(
+                        text = behaviorProfile,
+                        color = JarvisTextPrimary,
+                        fontSize = 11.sp,
+                        fontFamily = FontFamily.Monospace,
+                        lineHeight = 16.sp
+                    )
+                }
+            }
+        }
+
+        // INTEGRITY SHIELD FIREWALL SECURITY REPORT
+        item {
+            Card(
+                modifier = Modifier.fillMaxWidth().testTag("security_firewall_card"),
+                colors = CardDefaults.cardColors(containerColor = JarvisSurface),
+                border = BorderStroke(1.dp, JarvisSurfaceVariant)
+            ) {
+                Column(modifier = Modifier.padding(14.dp)) {
+                    Text(
+                        text = "🛡️ LOCAL INTEGRITY SHIELD AUDITS",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = JarvisSecondary,
+                        fontFamily = FontFamily.Monospace
+                    )
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Divider(color = JarvisSurfaceVariant)
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    Text(
+                        text = viewModel.securityManager.compileSecurityAuditSummary(),
+                        color = JarvisTextPrimary,
+                        fontSize = 11.sp,
+                        fontFamily = FontFamily.Monospace,
+                        lineHeight = 16.sp
+                    )
+
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text(
+                        text = "Vulnerability Logs (Past 5 occurrences):",
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = JarvisTextSecondary,
+                        fontFamily = FontFamily.Monospace
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+
+                    if (securityReport.isEmpty()) {
+                        Text(
+                            text = "No safety anomalies caught on firewall. Verified sandbox secure.",
+                            fontSize = 10.sp,
+                            color = Color.Green.copy(alpha = 0.8f),
+                            fontFamily = FontFamily.Monospace
+                        )
+                    } else {
+                        securityReport.take(5).forEach { record ->
+                            Text(
+                                text = record,
+                                fontSize = 9.5.sp,
+                                color = JarvisError.copy(alpha = 0.9f),
+                                fontFamily = FontFamily.Monospace,
+                                lineHeight = 13.sp,
+                                modifier = Modifier.padding(vertical = 2.dp)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        // Active Synaptic Logs Stream Console Terminal
         item {
             Card(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(350.dp),
+                    .height(300.dp)
+                    .testTag("synaptic_logs_card"),
                 colors = CardDefaults.cardColors(containerColor = Color(0xFF141316)),
                 border = BorderStroke(1.dp, JarvisSurfaceVariant)
             ) {
@@ -1907,18 +2417,31 @@ fun AutomationSystemTab(
                     Divider(color = JarvisSurfaceVariant)
                     Spacer(modifier = Modifier.height(8.dp))
 
-                    LazyColumn(
-                        modifier = Modifier.fillMaxSize(),
-                        verticalArrangement = Arrangement.spacedBy(4.dp)
-                    ) {
-                        items(logs) { log ->
-                            Text(
-                                text = log,
-                                color = JarvisTextSecondary,
-                                fontSize = 11.sp,
-                                fontFamily = FontFamily.Monospace,
-                                modifier = Modifier.fillMaxWidth()
-                            )
+                    if (logs.isEmpty()) {
+                        Text(
+                            text = "Awaiting synaptic signals. Speak 'Jarvis' to trace background frequencies.",
+                            color = JarvisTextSecondary,
+                            fontSize = 10.sp,
+                            fontFamily = FontFamily.Monospace
+                        )
+                    } else {
+                        // Displaying logs inside a compact scrollable container using dynamic layout loop
+                        val logScrollState = rememberScrollState()
+                        Column(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .verticalScroll(logScrollState),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            logs.forEach { log ->
+                                Text(
+                                    text = log,
+                                    color = JarvisTextSecondary,
+                                    fontSize = 10.sp,
+                                    fontFamily = FontFamily.Monospace,
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                            }
                         }
                     }
                 }
@@ -1926,3 +2449,1054 @@ fun AutomationSystemTab(
         }
     }
 }
+
+// =================== PHASE 4: ADVANCED VISION & STUDY ASSISTANT ===================
+@Composable
+fun AdvancedVisionStudyTab(viewModel: com.example.ui.viewmodel.JarvisViewModel) {
+    val scenes = remember { viewModel.visionAgentSystem.getScenes() }
+    var selectedIndex by remember { mutableStateOf(0) }
+    val currentScene = scenes[selectedIndex]
+    var customExtraPrompt by remember { mutableStateOf("") }
+    var resultText by remember { mutableStateOf("") }
+    var isScanning by remember { mutableStateOf(false) }
+    val coroutineScope = rememberCoroutineScope()
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(16.dp)
+            .verticalScroll(rememberScrollState()),
+        verticalArrangement = Arrangement.spacedBy(16.dp)
+    ) {
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = JarvisSurface),
+            border = BorderStroke(1.dp, JarvisPrimary.copy(alpha = 0.3f))
+        ) {
+            Column(modifier = Modifier.padding(14.dp)) {
+                Text(
+                    text = "👁️ NEURAL OPTICS EYE SIMULATOR",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = JarvisPrimary,
+                    fontFamily = FontFamily.Monospace
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = "Observe physics diagrams, mathematics homework worksheets, text documents, or physical room spaces in absolute film-realistic accuracy. Select a scenario vector below to feed OCR matrix descriptions to J.A.R.V.I.S.",
+                    fontSize = 11.sp,
+                    color = JarvisTextSecondary,
+                    lineHeight = 16.sp
+                )
+            }
+        }
+
+        Text(
+            text = "🎬 CHOOSE STUDY OR OBJECT SCENARIO:",
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Bold,
+            color = JarvisSecondary,
+            fontFamily = FontFamily.Monospace
+        )
+
+        // Horizontal pill row
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            scenes.forEachIndexed { idx, scene ->
+                val isSelected = selectedIndex == idx
+                Button(
+                    onClick = { selectedIndex = idx },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = if (isSelected) JarvisPrimary else JarvisSurfaceVariant
+                    ),
+                    shape = RoundedCornerShape(8.dp),
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                ) {
+                    Text(
+                        text = scene.displayName,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = if (isSelected) Color.Black else Color.White,
+                        fontFamily = FontFamily.Monospace
+                    )
+                }
+            }
+        }
+
+        // Scene HUD Card
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(180.dp),
+            colors = CardDefaults.cardColors(containerColor = Color.Black),
+            border = BorderStroke(1.dp, if (isScanning) JarvisTertiary else JarvisSurfaceVariant)
+        ) {
+            Box(modifier = Modifier.fillMaxSize()) {
+                if (isScanning) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.align(Alignment.Center),
+                        color = JarvisTertiary
+                    )
+                    Text(
+                        text = "NEURAL OPTICS COORDINATING SYNAPSES...",
+                        fontSize = 10.sp,
+                        color = JarvisTertiary,
+                        fontWeight = FontWeight.Bold,
+                        fontFamily = FontFamily.Monospace,
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .padding(bottom = 16.dp)
+                    )
+                } else {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(14.dp),
+                        verticalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(
+                                text = "📡 CAMERA FEED: ACTIVE",
+                                fontSize = 9.sp,
+                                color = JarvisSuccess,
+                                fontFamily = FontFamily.Monospace,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = "SUBJ: ${currentScene.subject.uppercase()}",
+                                fontSize = 9.sp,
+                                color = JarvisPrimary,
+                                fontFamily = FontFamily.Monospace,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+
+                        Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth()) {
+                            Text(
+                                text = " [Target: ${currentScene.displayName.uppercase()}]",
+                                fontSize = 11.sp,
+                                color = Color.White,
+                                fontWeight = FontWeight.Bold,
+                                fontFamily = FontFamily.Monospace
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = "Scene Description: ${currentScene.sceneDescription}",
+                                fontSize = 10.sp,
+                                color = JarvisTextSecondary,
+                                textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                            )
+                        }
+
+                        Text(
+                            text = "OCR EXTR: \"${currentScene.ocrExtractedText}\"",
+                            fontSize = 8.sp,
+                            color = JarvisSecondary,
+                            fontFamily = FontFamily.Monospace,
+                            maxLines = 1,
+                            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                        )
+                    }
+                }
+            }
+        }
+
+        // Custom manual input parameter
+        OutlinedTextField(
+            value = customExtraPrompt,
+            onValueChange = { customExtraPrompt = it },
+            label = { Text("Verbal commands (e.g. Solve, Translate, en munnadi enna irukku?)", fontSize = 11.sp) },
+            modifier = Modifier.fillMaxWidth(),
+            colors = OutlinedTextFieldDefaults.colors(
+                focusedBorderColor = JarvisPrimary,
+                unfocusedBorderColor = JarvisSurfaceVariant,
+                focusedTextColor = Color.White,
+                unfocusedTextColor = Color.White,
+                focusedLabelColor = JarvisPrimary
+            ),
+            textStyle = TextStyle(fontSize = 13.sp, fontFamily = FontFamily.Monospace)
+        )
+
+        Button(
+            onClick = {
+                val promptText = viewModel.visionAgentSystem.formVisionAnalysisPrompt(currentScene.key, customExtraPrompt)
+                coroutineScope.launch {
+                    isScanning = true
+                    resultText = ""
+                    kotlinx.coroutines.delay(1200)
+                    viewModel.queryGeminiDirectly(promptText) { reply ->
+                        resultText = reply
+                        isScanning = false
+                    }
+                }
+            },
+            modifier = Modifier.fillMaxWidth(),
+            colors = ButtonDefaults.buttonColors(containerColor = JarvisTertiary),
+            shape = RoundedCornerShape(8.dp),
+            enabled = !isScanning
+        ) {
+            Text(
+                text = "⚡ LAUNCH NEURAL OPTICS SCAN",
+                fontWeight = FontWeight.Bold,
+                fontSize = 11.sp,
+                color = Color.Black,
+                fontFamily = FontFamily.Monospace
+            )
+        }
+
+        // Analysis result Console terminal
+        if (resultText.isNotBlank()) {
+            Text(
+                text = "🖥️ J.A.R.V.I.S SCIENCE TERMINAL REPORT:",
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold,
+                color = JarvisPrimary,
+                fontFamily = FontFamily.Monospace
+            )
+
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF141316)),
+                border = BorderStroke(1.dp, JarvisSurfaceVariant)
+            ) {
+                Column(modifier = Modifier.padding(14.dp)) {
+                    Text(
+                        text = resultText,
+                        color = Color.White,
+                        fontSize = 11.sp,
+                        fontFamily = FontFamily.SansSerif,
+                        lineHeight = 17.sp
+                    )
+                }
+            }
+        }
+    }
+}
+
+// =================== PHASE 3 & PHASE 7: SCHEDULER & LOCAL KNOWLEDGE BASE ===================
+@Composable
+fun SmartSchedulerTab(viewModel: com.example.ui.viewmodel.JarvisViewModel) {
+    var tasksList by remember { mutableStateOf(emptyList<com.example.brain.TaskAgentSystem.UserTask>()) }
+    var textTitle by remember { mutableStateOf("") }
+    var textTime by remember { mutableStateOf("") }
+    var recurrenceOption by remember { mutableStateOf("Once") }
+    var priorityOption by remember { mutableStateOf("MEDIUM") }
+
+    var searchDocsQuery by remember { mutableStateOf("") }
+    var selectedDocId by remember { mutableStateOf<String?>(null) }
+    var summaryText by remember { mutableStateOf("") }
+    var isSummarizing by remember { mutableStateOf(false) }
+
+    val coroutineScope = rememberCoroutineScope()
+
+    // Load tasks on entry
+    LaunchedEffect(Unit) {
+        tasksList = viewModel.taskAgentSystem.getTasks()
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(16.dp)
+            .verticalScroll(rememberScrollState()),
+        verticalArrangement = Arrangement.spacedBy(16.dp)
+    ) {
+        // Core morning briefs panel
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = JarvisSurface),
+            border = BorderStroke(1.dp, JarvisPrimary.copy(alpha = 0.3f))
+        ) {
+            Column(modifier = Modifier.padding(14.dp)) {
+                Text(
+                    text = "🌅 INTEGRATIVE SCHEDULING PORTAL",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = JarvisPrimary,
+                    fontFamily = FontFamily.Monospace
+                )
+                Spacer(modifier = Modifier.height(10.dp))
+                
+                var morningOpen by remember { mutableStateOf(false) }
+                var nightOpen by remember { mutableStateOf(false) }
+
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Button(
+                        onClick = { morningOpen = !morningOpen; nightOpen = false },
+                        colors = ButtonDefaults.buttonColors(containerColor = JarvisSurfaceVariant),
+                        shape = RoundedCornerShape(4.dp)
+                    ) {
+                        Text("Morning Briefing", fontSize = 10.sp, color = JarvisPrimary, fontFamily = FontFamily.Monospace)
+                    }
+                    Button(
+                        onClick = { nightOpen = !nightOpen; morningOpen = false },
+                        colors = ButtonDefaults.buttonColors(containerColor = JarvisSurfaceVariant),
+                        shape = RoundedCornerShape(4.dp)
+                    ) {
+                        Text("Night Summary", fontSize = 10.sp, color = JarvisSecondary, fontFamily = FontFamily.Monospace)
+                    }
+                }
+
+                if (morningOpen) {
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Text(
+                        text = viewModel.proactiveSystem.compileMorningBriefing("Ranjan", tasksList.filter { !it.isCompleted }.size),
+                        fontSize = 11.sp,
+                        color = Color.White,
+                        lineHeight = 16.sp
+                    )
+                }
+
+                if (nightOpen) {
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Text(
+                        text = viewModel.proactiveSystem.compileNightBriefing(
+                            "Ranjan",
+                            tasksList.filter { it.isCompleted }.size,
+                            tasksList.filter { !it.isCompleted }.size
+                        ),
+                        fontSize = 11.sp,
+                        color = Color.White,
+                        lineHeight = 16.sp
+                    )
+                }
+            }
+        }
+
+        // Task addition block
+        Text(
+            text = "📅 ADD NEW TASK DIRECTIVE:",
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Bold,
+            color = JarvisSecondary,
+            fontFamily = FontFamily.Monospace
+        )
+
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = JarvisSurface)
+        ) {
+            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(
+                    value = textTitle,
+                    onValueChange = { textTitle = it },
+                    label = { Text("Task description", fontSize = 10.sp) },
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedTextColor = Color.White,
+                        unfocusedTextColor = Color.White,
+                        focusedBorderColor = JarvisPrimary,
+                        unfocusedBorderColor = JarvisSurfaceVariant
+                    )
+                )
+
+                OutlinedTextField(
+                    value = textTime,
+                    onValueChange = { textTime = it },
+                    label = { Text("Time (e.g. Tomorrow 7 AM, tonight, Gym)", fontSize = 10.sp) },
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedTextColor = Color.White,
+                        unfocusedTextColor = Color.White,
+                        focusedBorderColor = JarvisPrimary,
+                        unfocusedBorderColor = JarvisSurfaceVariant
+                    )
+                )
+
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    // Simple text trigger toggle
+                    Button(
+                        onClick = { recurrenceOption = if (recurrenceOption == "Once") "Daily" else "Once" },
+                        colors = ButtonDefaults.buttonColors(containerColor = JarvisSurfaceVariant)
+                    ) {
+                        Text("Type: $recurrenceOption", fontSize = 9.sp, color = Color.White)
+                    }
+                    Button(
+                        onClick = { priorityOption = if (priorityOption == "MEDIUM") "HIGH" else "MEDIUM" },
+                        colors = ButtonDefaults.buttonColors(containerColor = JarvisSurfaceVariant)
+                    ) {
+                        Text("Priority: $priorityOption", fontSize = 9.sp, color = Color.White)
+                    }
+                }
+
+                Button(
+                    onClick = {
+                        if (textTitle.isNotBlank() && textTime.isNotBlank()) {
+                            coroutineScope.launch {
+                                viewModel.taskAgentSystem.addTask(
+                                    textTitle,
+                                    textTime,
+                                    recurrenceOption != "Once",
+                                    recurrenceOption,
+                                    priorityOption
+                                )
+                                tasksList = viewModel.taskAgentSystem.getTasks()
+                                textTitle = ""
+                                textTime = ""
+                            }
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.buttonColors(containerColor = JarvisPrimary)
+                ) {
+                    Text("ADD TASK TO DATABASE", fontSize = 10.sp, color = Color.Black, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+                }
+            }
+        }
+
+        // Active Tasks List
+        tasksList.forEach { task ->
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = if (task.isCompleted) Color(0xFF142B20) else JarvisSurface),
+                border = BorderStroke(1.dp, if (task.priority == "HIGH") JarvisTertiary.copy(alpha = 0.5f) else JarvisSurfaceVariant)
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(12.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = task.description,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White,
+                            fontFamily = FontFamily.Monospace,
+                            textDecoration = if (task.isCompleted) androidx.compose.ui.text.style.TextDecoration.LineThrough else null
+                        )
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text(text = "🕒 ${task.targetTime}", fontSize = 10.sp, color = JarvisTextSecondary)
+                            Text(text = "• ${task.priority}", fontSize = 10.sp, color = if (task.priority == "HIGH") JarvisTertiary else JarvisPrimary)
+                        }
+                    }
+
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Button(
+                            onClick = {
+                                coroutineScope.launch {
+                                    viewModel.taskAgentSystem.toggleTaskCompletion(task.dbId)
+                                    tasksList = viewModel.taskAgentSystem.getTasks()
+                                }
+                            },
+                            shape = RoundedCornerShape(4.dp),
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = JarvisSuccess)
+                        ) {
+                            Text("Done", fontSize = 9.sp, color = Color.Black)
+                        }
+
+                        Button(
+                            onClick = {
+                                coroutineScope.launch {
+                                    viewModel.taskAgentSystem.deleteTask(task.dbId)
+                                    tasksList = viewModel.taskAgentSystem.getTasks()
+                                }
+                            },
+                            shape = RoundedCornerShape(4.dp),
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = Color.Red)
+                        ) {
+                            Text("Del", fontSize = 9.sp, color = Color.White)
+                        }
+                    }
+                }
+            }
+        }
+
+        // =================== PHASE 7: LOCAL KNOWLEDGE BASE ===================
+        Text(
+            text = "📚 SEARCHABLE LOCAL KNOWLEDGE BASE (PDF/DOC):",
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Bold,
+            color = JarvisPrimary,
+            fontFamily = FontFamily.Monospace
+        )
+
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = JarvisSurface)
+        ) {
+            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(
+                    value = searchDocsQuery,
+                    onValueChange = { searchDocsQuery = it },
+                    label = { Text("Search keyword (e.g. quantum, java, composer, history)", fontSize = 10.sp) },
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedTextColor = Color.White,
+                        unfocusedTextColor = Color.White,
+                        focusedBorderColor = JarvisPrimary,
+                        unfocusedBorderColor = JarvisSurfaceVariant
+                    )
+                )
+
+                val docs = remember(searchDocsQuery) { viewModel.knowledgeBaseSystem.searchKnowledge(searchDocsQuery) }
+                
+                docs.forEach { doc ->
+                    val isSelected = selectedDocId == doc.id
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { selectedDocId = doc.id },
+                        colors = CardDefaults.cardColors(containerColor = if (isSelected) JarvisPrimary.copy(alpha = 0.1f) else Color.Black),
+                        border = if (isSelected) BorderStroke(1.dp, JarvisPrimary) else null
+                    ) {
+                        Column(modifier = Modifier.padding(8.dp)) {
+                            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                Text(text = doc.title, fontSize = 11.sp, color = Color.White, fontWeight = FontWeight.SemiBold)
+                                Text(text = doc.fileType, fontSize = 9.sp, color = JarvisSecondary, fontFamily = FontFamily.Monospace)
+                            }
+                            Text(text = "Category: ${doc.category} • ${doc.wordCount} words", fontSize = 9.sp, color = JarvisTextSecondary)
+                        }
+                    }
+                }
+
+                if (selectedDocId != null) {
+                    Button(
+                        onClick = {
+                            isSummarizing = true
+                            coroutineScope.launch {
+                                kotlinx.coroutines.delay(800)
+                                summaryText = viewModel.knowledgeBaseSystem.generateAISummary(selectedDocId!!)
+                                isSummarizing = false
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.buttonColors(containerColor = JarvisSecondary)
+                    ) {
+                        if (isSummarizing) {
+                            CircularProgressIndicator(modifier = Modifier.size(16.dp), color = Color.Black)
+                        } else {
+                            Text("COMPILE AI SUMMARY & STUDY ABSTRACTS", fontSize = 10.sp, color = Color.Black, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+
+                if (summaryText.isNotBlank()) {
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(containerColor = Color(0xFF141316)),
+                        border = BorderStroke(1.dp, JarvisSurfaceVariant)
+                    ) {
+                        Text(
+                            text = summaryText,
+                            modifier = Modifier.padding(10.dp),
+                            color = Color.White,
+                            fontSize = 11.sp,
+                            fontFamily = FontFamily.Monospace,
+                            lineHeight = 16.sp
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+// =================== PHASE 2: USER PROFILE & INTEGRATIVE PERSONAL MEMORIES ===================
+@Composable
+fun PersonalProfileMemoriesTab(
+    viewModel: com.example.ui.viewmodel.JarvisViewModel,
+    memories: List<com.example.data.database.UserMemory>,
+    onDeleteMemory: (Long) -> Unit
+) {
+    var userProfileSummary by remember { mutableStateOf("") }
+    var inputName by remember { mutableStateOf("") }
+    var searchRegistryKeyword by remember { mutableStateOf("") }
+    val coroutineScope = rememberCoroutineScope()
+
+    // Reload profile summary on entry
+    LaunchedEffect(Unit) {
+        userProfileSummary = viewModel.userProfileSystem.compileUserProfileSummary()
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(16.dp)
+            .verticalScroll(rememberScrollState()),
+        verticalArrangement = Arrangement.spacedBy(16.dp)
+    ) {
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = JarvisSurface),
+            border = BorderStroke(1.dp, JarvisPrimary.copy(alpha = 0.3f))
+        ) {
+            Column(modifier = Modifier.padding(14.dp)) {
+                Text(
+                    text = "👤 JARVIS USER PROFILE CORES",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = JarvisPrimary,
+                    fontFamily = FontFamily.Monospace
+                )
+                Spacer(modifier = Modifier.height(10.dp))
+                Text(
+                    text = userProfileSummary,
+                    fontSize = 11.sp,
+                    color = Color.White,
+                    fontFamily = FontFamily.Monospace,
+                    lineHeight = 16.sp
+                )
+            }
+        }
+
+        // Change name input
+        Text(
+            text = "✏️ ENGAGE USER PROFILE UPDATE:",
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Bold,
+            color = JarvisSecondary,
+            fontFamily = FontFamily.Monospace
+        )
+
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = JarvisSurface)
+        ) {
+            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                OutlinedTextField(
+                    value = inputName,
+                    onValueChange = { inputName = it },
+                    label = { Text("Enter nickname (e.g. Ranjan, David, Boss)", fontSize = 10.sp) },
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedTextColor = Color.White,
+                        unfocusedTextColor = Color.White,
+                        focusedBorderColor = JarvisPrimary,
+                        unfocusedBorderColor = JarvisSurfaceVariant
+                    )
+                )
+
+                Button(
+                    onClick = {
+                        if (inputName.isNotBlank()) {
+                            viewModel.updateUserName(inputName)
+                            coroutineScope.launch {
+                                // Save profile memory
+                                viewModel.userProfileSystem.learnPersonalFact("User Name", inputName, "preference")
+                                userProfileSummary = viewModel.userProfileSystem.compileUserProfileSummary()
+                                inputName = ""
+                            }
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.buttonColors(containerColor = JarvisPrimary)
+                ) {
+                    Text("HOT-SWAP NICKNAME REGISTER", fontSize = 10.sp, color = Color.Black, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+                }
+            }
+        }
+
+        // 1. PRIVACY-FIRST CONVERSATION SETTINGS
+        Text(
+            text = "🛡️ PRIVACY-FIRST CONVERSATION SETTINGS:",
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Bold,
+            color = JarvisPrimary,
+            fontFamily = FontFamily.Monospace
+        )
+
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = JarvisSurface),
+            border = BorderStroke(1.dp, JarvisPrimary.copy(alpha = 0.2f))
+        ) {
+            Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                val nameUsageEnabled by viewModel.nameUsageEnabled.collectAsState()
+                
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Enable Name Announcement",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White,
+                            fontFamily = FontFamily.Monospace
+                        )
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Text(
+                            text = "When disabled, Jarvis hides your identity completely in speech, notifications, daily reminders, and public lockscreens to ensure privacy.",
+                            fontSize = 10.sp,
+                            color = Color.LightGray,
+                            lineHeight = 14.sp
+                        )
+                    }
+                    Switch(
+                        checked = nameUsageEnabled,
+                        onCheckedChange = { viewModel.setNameUsageEnabled(it) },
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = JarvisPrimary,
+                            checkedTrackColor = JarvisPrimary.copy(alpha = 0.4f),
+                            uncheckedThumbColor = Color.LightGray,
+                            uncheckedTrackColor = Color.DarkGray
+                        )
+                    )
+                }
+
+                HorizontalDivider(color = JarvisSurfaceVariant.copy(alpha = 0.5f), thickness = 0.5.dp)
+
+                Text(
+                    text = "STATUS: ${if (nameUsageEnabled) "PERSONALIZED ENGAGEMENT" else "PRIVACY-FIRST MODE (SECURED)"}",
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = if (nameUsageEnabled) JarvisSecondary else JarvisPrimary,
+                    fontFamily = FontFamily.Monospace
+                )
+            }
+        }
+
+        // 2. ADAPTIVE VOICE PERSONALITY ENGINE (AUTONOMOUS COGNITION)
+        Text(
+            text = "🔊 ADAPTIVE VOICE COGNITIVE ENGINE:",
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Bold,
+            color = JarvisSecondary,
+            fontFamily = FontFamily.Monospace
+        )
+
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = JarvisSurface),
+            border = BorderStroke(1.dp, JarvisSecondary.copy(alpha = 0.2f))
+        ) {
+            Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                val activeVoiceStyle by viewModel.activeVoiceStyle.collectAsState()
+                val activeVoiceDesc by viewModel.activeVoiceDesc.collectAsState()
+
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        modifier = Modifier
+                            .size(10.dp)
+                            .clip(CircleShape)
+                            .background(JarvisSecondary)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "AUTONOMOUS VOCAL INTELLIGENCE",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = JarvisSecondary,
+                        fontFamily = FontFamily.Monospace
+                    )
+                }
+
+                Text(
+                    text = "Current Autonomous Voice Profile:",
+                    fontSize = 10.sp,
+                    color = Color.LightGray
+                )
+
+                Text(
+                    text = activeVoiceStyle,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.ExtraBold,
+                    color = Color.White,
+                    fontFamily = FontFamily.Monospace
+                )
+
+                Text(
+                    text = "Characteristics: $activeVoiceDesc",
+                    fontSize = 11.sp,
+                    color = JarvisPrimary,
+                    fontWeight = FontWeight.SemiBold
+                )
+
+                HorizontalDivider(color = JarvisSurfaceVariant.copy(alpha = 0.5f), thickness = 0.5.dp)
+
+                Text(
+                    text = "Adaptive style scales automatically in real time based on your emotional prompts, learning pacing triggers, late-night hours, and daily context query length. Manual voice toggle settings are disengaged for maximum natural human conversation flow.",
+                    fontSize = 9.sp,
+                    color = Color.LightGray,
+                    textAlign = TextAlign.Justify,
+                    lineHeight = 13.sp
+                )
+            }
+        }
+
+        // Existing Voice memory storage registries
+        Text(
+            text = "🎙️ INTERVENE MEMORIES REGISTRY",
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Bold,
+            color = JarvisSecondary,
+            fontFamily = FontFamily.Monospace
+        )
+
+        OutlinedTextField(
+            value = searchRegistryKeyword,
+            onValueChange = { searchRegistryKeyword = it },
+            label = { Text("Filter memory keywords...", fontSize = 11.sp) },
+            modifier = Modifier.fillMaxWidth(),
+            colors = OutlinedTextFieldDefaults.colors(
+                focusedTextColor = Color.White,
+                unfocusedTextColor = Color.White,
+                focusedBorderColor = JarvisPrimary,
+                unfocusedBorderColor = JarvisSurfaceVariant
+            )
+        )
+
+        val filteredMemories = remember(memories, searchRegistryKeyword) {
+            if (searchRegistryKeyword.isBlank()) {
+                memories
+            } else {
+                memories.filter {
+                    it.key.contains(searchRegistryKeyword, ignoreCase = true) ||
+                    it.value.contains(searchRegistryKeyword, ignoreCase = true) ||
+                    it.category.contains(searchRegistryKeyword, ignoreCase = true)
+                }
+            }
+        }
+
+        filteredMemories.forEach { mem ->
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = JarvisSurface),
+                border = BorderStroke(1.dp, JarvisSurfaceVariant)
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(12.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = mem.key,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = JarvisPrimary,
+                            fontFamily = FontFamily.Monospace
+                        )
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Text(
+                            text = mem.value,
+                            fontSize = 11.sp,
+                            color = Color.White
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(text = "Category: ${mem.category.uppercase()} • Rank: ${mem.importance}/5", fontSize = 9.sp, color = JarvisTextSecondary)
+                    }
+                    Button(
+                        onClick = { onDeleteMemory(mem.id) },
+                        colors = ButtonDefaults.buttonColors(containerColor = Color.Red),
+                        shape = RoundedCornerShape(4.dp),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp)
+                    ) {
+                        Text("Delete", fontSize = 9.sp, color = Color.White)
+                    }
+                }
+            }
+        }
+    }
+}
+
+// =================== PHASE 1, 5, 6: CORES DIAGNOSTICS & SYSTEM MONITOR ===================
+@Composable
+fun SystemDiagnosticsTab(
+    viewModel: com.example.ui.viewmodel.JarvisViewModel,
+    logs: List<String>
+) {
+    val agents = remember { viewModel.multiAgentCoordinator.getAgentsList() }
+    val plugins = remember { viewModel.pluginManager.getInstalledPlugins() }
+    var stabilityMatrixSummary by remember { mutableStateOf("") }
+    val coroutineScope = rememberCoroutineScope()
+
+    // Load stability matrix
+    LaunchedEffect(Unit) {
+        stabilityMatrixSummary = viewModel.stabilitySystem.compileStabilityMatrix()
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(16.dp)
+            .verticalScroll(rememberScrollState()),
+        verticalArrangement = Arrangement.spacedBy(16.dp)
+    ) {
+        // ERROR WATCHDOG & STABILITY CRASH RECOVERY
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = JarvisSurface),
+            border = BorderStroke(1.dp, JarvisPrimary.copy(alpha = 0.3f))
+        ) {
+            Column(modifier = Modifier.padding(14.dp)) {
+                Text(
+                    text = "🛡️ SYSTEM WATCHDOG & WATCHDOG HEALING REPORT",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = JarvisPrimary,
+                    fontFamily = FontFamily.Monospace
+                )
+                Spacer(modifier = Modifier.height(10.dp))
+                Text(
+                    text = stabilityMatrixSummary,
+                    fontSize = 11.sp,
+                    color = Color.White,
+                    fontFamily = FontFamily.Monospace,
+                    lineHeight = 16.sp
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                Button(
+                    onClick = {
+                        coroutineScope.launch {
+                            viewModel.stabilitySystem.trackError("VOICE", "Simulated microphone hardware signal loss recovery initiated.")
+                            stabilityMatrixSummary = viewModel.stabilitySystem.compileStabilityMatrix()
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.buttonColors(containerColor = JarvisSurfaceVariant)
+                ) {
+                    Text("TRIGGER MANUAL HEARTRATE SELF-HEAL", fontSize = 10.sp, color = JarvisPrimary, fontFamily = FontFamily.Monospace)
+                }
+            }
+        }
+
+        // DYNAMIC BUILT-IN PLUGINS MANAGER
+        Text(
+            text = "🔌 MODULAR SYSTEM PLUGINS SYSTEM:",
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Bold,
+            color = JarvisSecondary,
+            fontFamily = FontFamily.Monospace
+        )
+
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = JarvisSurface)
+        ) {
+            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                plugins.forEach { plugin ->
+                    var isPluginEnabled by remember { mutableStateOf(plugin.isEnabled) }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column {
+                            Text(text = plugin.name, fontSize = 11.sp, color = Color.White, fontWeight = FontWeight.Bold)
+                            Text(text = "Ver: ${plugin.version} • Trigger keywords: ${plugin.keywordTriggers.joinToString(",")}", fontSize = 9.sp, color = JarvisTextSecondary)
+                        }
+                        Switch(
+                            checked = isPluginEnabled,
+                            onCheckedChange = { checked ->
+                                isPluginEnabled = checked
+                                plugin.isEnabled = checked
+                                viewModel.pluginManager.togglePlugin(plugin.name, checked)
+                            }
+                        )
+                    }
+                    Divider(color = JarvisSurfaceVariant.copy(alpha = 0.5f))
+                }
+            }
+        }
+
+        // COLLABORATIVE MULTI-AGENT STATE MONITOR
+        Text(
+            text = "🤖 COOPERATIVE COLLABORATING AI AGENTS CORES:",
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Bold,
+            color = JarvisPrimary,
+            fontFamily = FontFamily.Monospace
+        )
+
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = JarvisSurface),
+            border = BorderStroke(1.dp, JarvisSurfaceVariant)
+        ) {
+            Column(modifier = Modifier.padding(14.dp)) {
+                agents.forEach { agent ->
+                    Column(modifier = Modifier.padding(vertical = 6.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "🌀 ${agent.agentName}",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White,
+                                fontFamily = FontFamily.Monospace
+                            )
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(4.dp))
+                                    .background(if (agent.statusReport == "ACTIVE" || agent.statusReport == "ONLINE") JarvisSuccess.copy(alpha = 0.2f) else JarvisPrimary.copy(alpha = 0.2f))
+                                    .padding(horizontal = 6.dp, vertical = 2.dp)
+                            ) {
+                                Text(
+                                    text = agent.statusReport,
+                                    fontSize = 8.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (agent.statusReport == "ACTIVE" || agent.statusReport == "ONLINE") JarvisSuccess else JarvisPrimary,
+                                    fontFamily = FontFamily.Monospace
+                                )
+                            }
+                        }
+                        Text(
+                            text = agent.description,
+                            fontSize = 10.sp,
+                            color = JarvisTextSecondary,
+                            modifier = Modifier.padding(top = 2.dp)
+                        )
+                        Divider(modifier = Modifier.padding(top = 8.dp), color = JarvisSurfaceVariant.copy(alpha = 0.4f))
+                    }
+                }
+            }
+        }
+
+        // Active logs console
+        Text(
+            text = "💻 CORE LOGS SYNAPSE STREAM",
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Bold,
+            color = JarvisSecondary,
+            fontFamily = FontFamily.Monospace
+        )
+
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(200.dp),
+            colors = CardDefaults.cardColors(containerColor = Color.Black),
+            border = BorderStroke(1.dp, JarvisSurfaceVariant)
+        ) {
+            val sState = rememberScrollState()
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(10.dp)
+                    .verticalScroll(sState),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                logs.forEach { log ->
+                    Text(
+                        text = log,
+                        color = JarvisTextSecondary,
+                        fontSize = 10.sp,
+                        fontFamily = FontFamily.Monospace
+                    )
+                }
+            }
+        }
+    }
+}
+

@@ -143,15 +143,19 @@ class JarvisKeywordService : Service(), TextToSpeech.OnInitListener {
     }
 
     private fun acquireWakeLock() {
-        try {
-            val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
-            wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "JARVIS::WakeLock").apply {
-                setReferenceCounted(false)
-                acquire()
+        serviceScope.launch(Dispatchers.Default) {
+            delay(1000) // Hold briefly to allow foreground service promotion to settle
+            try {
+                val powerManager = applicationContext.getSystemService(Context.POWER_SERVICE) as PowerManager
+                val tag = "${applicationContext.packageName}:JARVIS::WakeLock"
+                wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, tag).apply {
+                    setReferenceCounted(false)
+                    acquire(5 * 60 * 1000L) // Safe limit to prevent severe battery leaks while satisfying AppOps
+                }
+                Log.d("JARVIS_SERVICE", "Partial WakeLock active with tag $tag.")
+            } catch (e: Exception) {
+                Log.e("JARVIS_SERVICE", "Failed to acquire wake lock", e)
             }
-            Log.d("JARVIS_SERVICE", "Partial WakeLock active.")
-        } catch (e: Exception) {
-            Log.e("JARVIS_SERVICE", "Failed to acquire wake lock", e)
         }
     }
 
@@ -199,7 +203,7 @@ class JarvisKeywordService : Service(), TextToSpeech.OnInitListener {
 
     private fun initializeSpeechRecognizer() {
         try {
-            speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this).apply {
+            speechRecognizer = SpeechRecognizer.createSpeechRecognizer(applicationContext).apply {
                 setRecognitionListener(object : RecognitionListener {
                     override fun onReadyForSpeech(params: android.os.Bundle?) {
                         Log.d("JARVIS_SERVICE", "Recognizer core synchronized.")
@@ -444,7 +448,40 @@ class JarvisKeywordService : Service(), TextToSpeech.OnInitListener {
                 Log.e("JARVIS_SERVICE", "Failed to modulate acoustic voice parameters.", e)
             }
 
-            tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "jarvis_service_session")
+            // Name Privacy sanitization in voice responses
+            val userName = memories.firstOrNull { 
+                it.key.lowercase().contains("user name") || it.key.lowercase() == "user_name"
+            }?.value ?: "Ranjan"
+            val lastUserMsg = withContext(Dispatchers.IO) { 
+                try {
+                    repository.allMessages.first().lastOrNull { it.sender == "USER" }?.text ?: ""
+                } catch (ex: Exception) {
+                    ""
+                }
+            }
+            val nameUsageSaved = memories.firstOrNull { it.key == "name_usage_enabled" }?.value
+            val nameUsageEnabled = (nameUsageSaved == "true")
+            val explicit = com.example.service.JarvisCommandProcessor.isExplicitNameRequest(lastUserMsg)
+
+            val sanitizedText = com.example.service.JarvisCommandProcessor.sanitizeResponseForPrivacy(
+                text,
+                userName,
+                nameUsageEnabled,
+                explicit
+            )
+
+            try {
+                tts?.speak(sanitizedText, TextToSpeech.QUEUE_FLUSH, null, "jarvis_service_session")
+            } catch (e: Exception) {
+                Log.e("JARVIS_SERVICE", "TTS Session crash recovered, fallback to default", e)
+                try {
+                    tts?.setPitch(1.0f)
+                    tts?.setSpeechRate(1.0f)
+                    tts?.speak(sanitizedText, TextToSpeech.QUEUE_FLUSH, null, "jarvis_service_session")
+                } catch (err: Exception) {
+                    Log.e("JARVIS_SERVICE", "TTS Critical fallback failed entirely.", err)
+                }
+            }
         }
     }
 
@@ -627,6 +664,19 @@ class JarvisKeywordService : Service(), TextToSpeech.OnInitListener {
         if (isThinking) return
         isThinking = true
         insertConversationMessage(commandText, isUser = true)
+
+        // Automatically adapt voice style based on command context/intent
+        val voiceParams = com.example.service.JarvisCommandProcessor.determineAdaptiveVoice(commandText)
+        serviceScope.launch(Dispatchers.IO) {
+            try {
+                repository.deleteMemoryByKey("voice_pitch")
+                repository.deleteMemoryByKey("voice_rate")
+                repository.insertMemory(UserMemory(key = "voice_pitch", value = voiceParams.pitch.toString(), category = "voice_settings"))
+                repository.insertMemory(UserMemory(key = "voice_rate", value = voiceParams.rate.toString(), category = "voice_settings"))
+            } catch (e: Exception) {
+                Log.e("JARVIS_SERVICE", "Failed to update automated adaptive voice params", e)
+            }
+        }
 
         serviceScope.launch {
             try {

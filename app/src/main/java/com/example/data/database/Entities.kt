@@ -18,6 +18,7 @@ data class UserMemory(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     val key: String,
     val value: String,
-    val category: String, // "preference", "fact", "routine"
-    val timestamp: Long = System.currentTimeMillis()
+    val category: String, // "personal", "conversation", "preference", "task", "event"
+    val timestamp: Long = System.currentTimeMillis(),
+    val importance: Int = 3 // Memory ranking (1 to 5)
 )

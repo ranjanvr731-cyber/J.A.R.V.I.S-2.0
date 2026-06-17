@@ -4,33 +4,60 @@ import android.util.Log
 
 class WakeWordManager {
     private val TAG = "JarvisWakeWordManager"
-    private var isListening = false
+    private var isCurrentlyListening = false
+    private var isMinimized = false
     private var microphoneFailureCount = 0
-    private val maxMicRetries = 4
+    private val maxMicRetries = 5
+    
+    // Conforms strictly to requirements: Hey Jarvis, Jarvis, Hello Jarvis
+    private val recognizedWakeWords = listOf("hey jarvis", "jarvis", "hello jarvis")
 
-    // Sets whether wake word is listening
+    // State query methods
     fun setListening(listening: Boolean) {
-        this.isListening = listening
-        Log.d(TAG, "Vocal listener loop updated: active=$listening")
+        this.isCurrentlyListening = listening
+        Log.i(TAG, "Background Wake-Word Continuous Loop: active=$listening")
     }
 
-    // Check listening status
-    fun isListening(): Boolean = isListening
+    fun isListening(): Boolean = isCurrentlyListening
 
-    // Error recovery for microphone
+    fun setMinimizedState(minimized: Boolean) {
+        this.isMinimized = minimized
+        Log.d(TAG, "Application minimization state updated. Minimized=$minimized. (Adapting battery optimizations)")
+    }
+
+    fun isMinimized(): Boolean = isMinimized
+
+    // Validates if spelling matches any of our target wake words
+    fun isWakeWordDetected(text: String): Boolean {
+        val lowerText = text.lowercase().trim()
+        val match = recognizedWakeWords.any { lowerText.contains(it) }
+        if (match) {
+            Log.i(TAG, "Success! Registered vocal wake trigger sequence matching target parameters on: '$lowerText'.")
+        }
+        return match
+    }
+
+    // Handles microphone errors & tracks retry thresholds
     fun registerMicrophoneError(): Boolean {
         microphoneFailureCount++
-        Log.e(TAG, "Hardware Microphone error detected. Count = $microphoneFailureCount")
+        Log.e(TAG, "System Audio Microphone error caught. Active fail cycle: $microphoneFailureCount of $maxMicRetries")
         return microphoneFailureCount < maxMicRetries
     }
 
-    // Clear error logs on successful initialization
     fun resetErrorLogs() {
         microphoneFailureCount = 0
     }
 
-    // Assess whether continuous stream needs safety reset
     fun shouldTriggerRecovery(): Boolean {
         return microphoneFailureCount >= maxMicRetries
+    }
+
+    // Energy management based of user activity status
+    fun getBatteryOptimizationClass(): String {
+        return if (isMinimized) {
+            "LOW_POWER_STANDBY"
+        } else {
+            "HIGH_PERFORMANCE_REALTIME"
+        }
     }
 }
