@@ -59,6 +59,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
     val visionAgentSystem by lazy { VisionAgentSystem() }
     val knowledgeBaseSystem by lazy { KnowledgeBaseSystem() }
     val proactiveSystem by lazy { ProactiveSystem() }
+    val questionAnsweringSystem by lazy { QuestionAnsweringSystem() }
 
     // Chat history
     val conversationState: StateFlow<List<ConversationMessage>> = repository.allMessages
@@ -181,11 +182,17 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                 Log.d("JARVIS_PLAN", "Planning execution step: ${step.description}")
             }
 
-            var responseText = ""
+            val diagnostic = selfDiagnosticSystem.runDiagnosticCheck()
+            var responseText = questionAnsweringSystem.processQuestion(
+                query = resolvedText,
+                ramUsage = diagnostic.currentRamFootprint,
+                batteryRate = diagnostic.batteryDrainRate
+            ) ?: ""
 
             // 5. Intercept for Smart Task/Reminder Scheduling
             val lowerText = resolvedText.lowercase()
-            if (lowerText.contains("remind") || 
+            if (responseText.isBlank() && (
+                lowerText.contains("remind") || 
                 lowerText.contains("reminder") || 
                 lowerText.contains("schedule") || 
                 lowerText.contains("task") || 
@@ -199,7 +206,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                 lowerText.contains("remove my") || 
                 lowerText.contains("tell me to") || 
                 lowerText.contains("clear all reminders")
-            ) {
+            )) {
                 try {
                     responseText = taskAgentSystem.parseAndRegisterTask(resolvedText)
                 } catch (e: Exception) {
