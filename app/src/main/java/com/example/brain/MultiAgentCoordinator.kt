@@ -143,7 +143,7 @@ class MultiAgentCoordinator(
             }
         } catch (e: Exception) {
             logAgentSync("⚠️ CRITICAL COLLAPSE: Knowledge Agent network exception. Deploying local recovery protocols.")
-            finalResult = "Hey Bro, my cerebral network link is acting up slightly. Let's rely on local databases: $fallbackResponse"
+            finalResult = fallbackResponse
         }
 
         knowledgeAgent.activeState = AgentState.IDLE

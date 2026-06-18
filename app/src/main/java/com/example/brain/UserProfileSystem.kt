@@ -21,7 +21,7 @@ class UserProfileSystem(private val repository: JarvisRepository) {
     suspend fun getProfile(): UserProfile {
         val memories = repository.allMemories.firstOrNull() ?: emptyList()
         
-        var nickname = "Ranjan"
+        var nickname = ""
         var speakingStyle = "Casual snappy Tanglish"
         val interests = mutableListOf<String>()
         val favoriteApps = mutableListOf<String>()
@@ -104,9 +104,10 @@ class UserProfileSystem(private val repository: JarvisRepository) {
 
     suspend fun compileUserProfileSummary(): String {
         val profile = getProfile()
+        val displayName = if (profile.nickname.isBlank()) "None (Uses neutral greetings like Sir, Bro, Friend)" else profile.nickname
         return buildString {
             append("--- PERSONALIZED USER PORTRAIT ENGINE ---\n")
-            append("👤 Current Nickname: ${profile.nickname}\n")
+            append("👤 Current Nickname: $displayName\n")
             append("🗣️ Speaking Preference: ${profile.speakingStyle}\n")
             append("🎨 Personal Interests: ${profile.interests.joinToString(", ")}\n")
             append("📱 Core App Integrations: ${profile.favoriteApps.joinToString(", ")}\n")

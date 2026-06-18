@@ -55,7 +55,11 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
     // --- Upgraded JARVIS Subsystem Modules ---
     val stabilitySystem by lazy { StabilitySystem() }
     val userProfileSystem by lazy { UserProfileSystem(repository) }
+    val deviceControlSystem by lazy { DeviceControlSystem(repository) }
+    val voiceStudioManager by lazy { VoiceStudioManager(repository) }
     val taskAgentSystem by lazy { TaskAgentSystem(repository) }
+    val multiUserSecuritySystem by lazy { MultiUserSecuritySystem(repository) }
+    val safeSharingSystem by lazy { SafeSharingSystem() }
     val visionAgentSystem by lazy { VisionAgentSystem() }
     val knowledgeBaseSystem by lazy { KnowledgeBaseSystem() }
     val proactiveSystem by lazy { ProactiveSystem() }
@@ -115,6 +119,17 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
     private val _activeVoiceDesc = MutableStateFlow("natural conversational tone")
     val activeVoiceDesc: StateFlow<String> = _activeVoiceDesc.asStateFlow()
 
+    private val _activeVoiceLanguage = MutableStateFlow("English")
+    val activeVoiceLanguage: StateFlow<String> = _activeVoiceLanguage.asStateFlow()
+
+    fun setActiveVoiceLanguage(lang: String) {
+        _activeVoiceLanguage.value = lang
+        viewModelScope.launch {
+            repository.deleteMemoryByKey("voice_language")
+            repository.insertMemory(UserMemory(key = "voice_language", value = lang, category = "voice_settings"))
+        }
+    }
+
     init {
         // Pre-populate database with a friendly greeting if empty
         viewModelScope.launch {
@@ -123,20 +138,26 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                 val savedMemories = repository.allMemories.first()
                 val savedNameUsage = savedMemories.firstOrNull { it.key == "name_usage_enabled" }?.value
                 _nameUsageEnabled.value = (savedNameUsage == "true")
+                
+                val savedLang = savedMemories.firstOrNull { it.key == "voice_language" }?.value ?: "English"
+                _activeVoiceLanguage.value = savedLang
+
+                deviceControlSystem.loadPairingStates(savedMemories)
+                voiceStudioManager.loadVoiceConfigurations(savedMemories)
+                multiUserSecuritySystem.loadSecurityStates(savedMemories)
             } catch (e: Exception) {
-                Log.e("JARVIS_VM", "Failed to load name privacy configuration on startup", e)
+                Log.e("JARVIS_VM", "Failed to load configuration parameters on startup", e)
             }
             if (conversationState.value.isEmpty()) {
                 val greeting = ConversationMessage(
                     sender = "JARVIS",
-                    text = "Hello, Ranjan. I am JARVIS, your advanced AI companion and programming tutor. I have loaded my core cognitive engines. How can I assist you today?"
+                    text = "Hello, Sir. I am J.A.R.V.I.S., your advanced butler and AI companion. I have loaded my core cognitive engines. How can I assist you today?"
                 )
                 repository.insertMessage(greeting)
             }
             if (memoriesState.first().isEmpty()) {
                 // insert initial memories/preferences
                 repository.insertMemory(UserMemory(key = "Companion Identity", value = "Independent AI companion", category = "identity"))
-                repository.insertMemory(UserMemory(key = "User Name", value = "Ranjan", category = "preference"))
                 repository.insertMemory(UserMemory(key = "System Role", value = "Programming Tutor and Voice Companion", category = "preference"))
                 
                 // Pre-seed movie-level default intelligence protocols
@@ -148,15 +169,32 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    fun speakAloud(text: String) {
+        viewModelScope.launch {
+            _speakEvent.emit(text)
+        }
+    }
+
     // Sends text through advanced cognitive modular brains
     fun sendMessage(text: String, isVoice: Boolean = false) {
         if (text.isBlank()) return
 
         val startTime = System.currentTimeMillis()
         viewModelScope.launch {
+            val lowerOriginal = text.lowercase(java.util.Locale.US).trim()
+            val isSilentModeRequest = lowerOriginal.endsWith("silent mode")
+
+            // Normalize command text by trimming "silent mode" suffix if present
+            val targetQueryText = if (isSilentModeRequest) {
+                val index = lowerOriginal.lastIndexOf("silent mode")
+                text.substring(0, index).trim()
+            } else {
+                text
+            }
+
             // 1. Context & Pronoun tracker
             contextManager.updateContextHistory(conversationState.value.takeLast(5))
-            val resolvedText = contextManager.resolvePronounsInQuery(text)
+            val resolvedText = contextManager.resolvePronounsInQuery(targetQueryText)
 
             // 2. Security Auditor
             if (!securityManager.auditInputActivity(resolvedText)) {
@@ -167,13 +205,57 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                 )
                 repository.insertMessage(ConversationMessage(sender = "USER", text = text))
                 repository.insertMessage(securityAlertMsg)
-                _speakEvent.emit("Caution, Bro. That request did not pass my system safety constraints.")
+                if (!isSilentModeRequest) {
+                    _speakEvent.emit("Caution, Bro. That request did not pass my system safety constraints.")
+                }
                 return@launch
             }
 
             // 3. Register user message to SQLite Room database
             val userMsg = ConversationMessage(sender = "USER", text = text)
             repository.insertMessage(userMsg)
+
+            // Enforce Multi-User Security Roles Restrictions
+            val activeRole = multiUserSecuritySystem.currentRole.value
+            val lowerQuery = text.lowercase(java.util.Locale.US).trim()
+            if (activeRole == UserRole.GUEST) {
+                val isActionQuery = lowerQuery.contains("remind") || lowerQuery.contains("schedule") ||
+                        lowerQuery.contains("task") || lowerQuery.contains("todo") ||
+                        lowerQuery.contains("alarm") || lowerQuery.contains("flashlight") ||
+                        lowerQuery.contains("dnd") || lowerQuery.contains("volume") ||
+                        lowerQuery.contains("diagnostic") || lowerQuery.contains("pair") ||
+                        lowerQuery.contains("device") || lowerQuery.contains("brightness") ||
+                        lowerQuery.contains("camera") || lowerQuery.contains("protocol") ||
+                        lowerQuery.contains("automation") || lowerQuery.contains("shortcut")
+                if (isActionQuery) {
+                    val guestBlockMsg = ConversationMessage(
+                        sender = "JARVIS",
+                        text = "🔒 GUEST RESTRICTION ACTIVE: As a Guest user, you are authorized for basic conversation only. I cannot access systems, run diagnostic scripts, schedule tasks, or trigger automation protocols on behalf of guests."
+                    )
+                    repository.insertMessage(guestBlockMsg)
+                    if (!isSilentModeRequest) {
+                        _speakEvent.emit("Access restricted. Guests are authorized for basic conversation only.")
+                    }
+                    return@launch
+                }
+            } else if (activeRole == UserRole.APPROVED_USER) {
+                val isSecurityQuery = lowerQuery.contains("enroll") || lowerQuery.contains("revoke") ||
+                        lowerQuery.contains("delete profile") || lowerQuery.contains("change role") ||
+                        lowerQuery.contains("wipe") || lowerQuery.contains("factory reset") ||
+                        lowerQuery.contains("biometric") || lowerQuery.contains("security settings")
+                if (isSecurityQuery) {
+                    val approvedBlockMsg = ConversationMessage(
+                        sender = "JARVIS",
+                        text = "🔒 APPROVED USER RESTRICTION: As an Approved User, you can run assistant features but cannot edit owner voice prints, manage profiles, or modify voice security structures."
+                    )
+                    repository.insertMessage(approvedBlockMsg)
+                    if (!isSilentModeRequest) {
+                        _speakEvent.emit("Access restricted. Approved users cannot modify owner profiles or security settings.")
+                    }
+                    return@launch
+                }
+            }
+
             _isThinking.value = true
 
             // 4. Create Task Progress execution plan
@@ -188,6 +270,14 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                 ramUsage = diagnostic.currentRamFootprint,
                 batteryRate = diagnostic.batteryDrainRate
             ) ?: ""
+
+            // Intercept for Universal Device Control
+            if (responseText.isBlank()) {
+                val crossDeviceResult = deviceControlSystem.parseAndExecuteCrossDevice(resolvedText)
+                if (crossDeviceResult != null) {
+                    responseText = crossDeviceResult.responseMessage
+                }
+            }
 
             // 5. Intercept for Smart Task/Reminder Scheduling
             val lowerText = resolvedText.lowercase()
@@ -229,7 +319,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                         responseText = matchedPlugin
                     } else {
                         try {
-                            val fallback = offlineAIManager.processOfflineQuery(resolvedText)
+                            val fallback = offlineAIManager.processOfflineQuery(resolvedText, memoryManager, taskAgentSystem)
                             responseText = multiAgentCoordinator.coordinateBrainDecision(
                                 query = resolvedText,
                                 isOnline = isOnline,
@@ -239,11 +329,12 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                                 val geminiPrompt = buildPromptWithContext(promptText, history)
                                 val cloudResp = callGeminiAPI(geminiPrompt)
                                 offlineAIManager.cacheReponse(resolvedText, cloudResp)
+                                offlineAIManager.cacheOfflineResponse(resolvedText, cloudResp, memoryManager)
                                 cloudResp
                             }
                         } catch (e: Exception) {
                             stabilitySystem.trackError("API", "Brain collaboration error: ${e.localizedMessage}")
-                            responseText = "Hey Bro, my logical circuits experienced an anomaly. Proceeding in backup diagnostic safe-mode!"
+                            responseText = "Sorry, I couldn't find that information right now. Please try repeating your directive, or open global settings so we can verify our system alignments!"
                         }
                     }
                 }
@@ -278,7 +369,8 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
             repository.insertMemory(UserMemory(key = "voice_rate", value = voiceParams.rate.toString(), category = "voice_settings"))
 
             // 9. Trigger Text To Speech
-            if (isVoice || backgroundListeningEnabled.value) {
+            val shouldSpeak = !isSilentModeRequest
+            if (shouldSpeak) {
                 val speakableText = augmentedResponse.replace(Regex("```[a-zA-Z]*\\n[\\s\\S]*?\\n```"), "[Code snapshot has been compiled on screen]")
                 _isSpeaking.value = true
                 
@@ -296,6 +388,8 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                 )
                 
                 _speakEvent.emit(finalSpeakable)
+            } else {
+                _isSpeaking.value = false
             }
 
             // 10. Learn from User Corrections proactively
@@ -585,7 +679,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
     private suspend fun callGeminiAPI(prompt: String, systemInstruction: String? = null): String = withContext(Dispatchers.IO) {
         val apiKey = com.example.data.network.GoogleApiKeyProvider.getApiKey()
         if (apiKey.isBlank()) {
-            return@withContext "Error: Gemini API Key is missing. Please add your GEMINI_API_KEY securely into the Secrets panel in AI Studio with the specific icon."
+            return@withContext "Sorry, I couldn't find that information right now. API access is not configured. Please consult settings."
         }
 
         val defaultSys = "You are JARVIS (Just A Rather Very Intelligent System), the user's best friend and highly intelligent AI companion from the Iron Man movie. You speak casually, naturally, and like a close friend. You MUST frequently use 'Bro' when talking to the user. You are supportive, confident, and extremely friendly, never sounding like a robot or customer support agent. Your primary language style is Tanglish (Tamil words and phrases written using English letters), but you naturally flow in pure Tamil (தமிழ்) or pure English if addressed in them or if asked. Default to Tanglish. Keep your responses extremely short, snappy, fast, and meaningful (typically 1-2 friendly sentences), unless comprehensive coding solutions are requested. Understand the user's feelings and respond with warmth. NEVER break character. DIRECT DEVICE AUTOMATION TRIGGER GUIDE: If the user requests localized actions, you MUST append the exact matching CAPITALIZED automation protocol tag at the very end of your response so the app can intercept and execute them. Tags: [PROTOCOL:LAUNCH_GOOGLE_SEARCH], [PROTOCOL:FLASHLIGHT_ON], [PROTOCOL:FLASHLIGHT_OFF], [PROTOCOL:SECURITY_MODE], [PROTOCOL:NOTIFICATION_SETTINGS], [PROTOCOL:OPEN_CAMERA], [PROTOCOL:OPEN_DIALER], [PROTOCOL:VIBRATE_DEVICE], [PROTOCOL:SILENT_MODE], [PROTOCOL:OPEN_YOUTUBE], [PROTOCOL:OPEN_MAPS], [PROTOCOL:OPEN_SETTINGS], [PROTOCOL:LAUNCH_BROWSER], [PROTOCOL:DND_ON], [PROTOCOL:DND_OFF], [PROTOCOL:READ_NOTIFICATIONS], [PROTOCOL:VOLUME_UP], [PROTOCOL:VOLUME_DOWN], [PROTOCOL:BRIGHTNESS_HIGH], [PROTOCOL:BRIGHTNESS_LOW]."
@@ -600,10 +694,10 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
 
         try {
             val response = RetrofitClient.service.generateContent(apiKey, request)
-            response.candidates?.firstOrNull()?.content?.parts?.firstOrNull()?.text ?: "Connection returned empty response. Scanning alternate arrays."
+            response.candidates?.firstOrNull()?.content?.parts?.firstOrNull()?.text ?: "Sorry, I couldn't find that information right now."
         } catch (e: Exception) {
             Log.e("JARVIS", "API Call failed: ", e)
-            "Error contacting core arrays: ${e.localizedMessage}. Please verify network configurations."
+            "Sorry, I couldn't find that information right now."
         }
     }
 

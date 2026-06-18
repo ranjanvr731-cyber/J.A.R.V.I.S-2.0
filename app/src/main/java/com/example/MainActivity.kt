@@ -18,6 +18,7 @@ import android.speech.RecognizerIntent
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.util.Log
+import android.content.pm.PackageManager
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -48,6 +49,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -68,8 +70,13 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.data.database.ConversationMessage
 import com.example.data.database.UserMemory
+import com.example.brain.UserRole
+import com.example.brain.ShareStatus
+import androidx.compose.ui.window.Dialog
 import com.example.ui.theme.*
 import com.example.ui.viewmodel.JarvisViewModel
+import com.example.ui.AutonomousAgentTab
+import com.example.ui.PremiumVoiceStudioTab
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
 import java.util.Locale
@@ -134,13 +141,15 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
     // TTS initialization
     override fun onInit(status: Int) {
         if (status == TextToSpeech.SUCCESS) {
-            val result = tts?.setLanguage(Locale.US)
+            val savedLanguage = viewModel.memoriesState.value.firstOrNull { it.key == "voice_language" }?.value ?: "English"
+            val locale = if (savedLanguage.lowercase().contains("tamil")) java.util.Locale("ta", "IN") else java.util.Locale.US
+            val result = tts?.setLanguage(locale)
             if (result == TextToSpeech.LANG_MISSING_DATA || result == TextToSpeech.LANG_NOT_SUPPORTED) {
-                Log.e("JARVIS", "TTS Language not supported or missing data")
+                Log.e("JARVIS", "TTS Language $locale not supported or missing data")
             } else {
                 isTtsInitialized = true
-                Log.d("JARVIS", "TTS Engine successfully initialized in English.")
-                viewModel.addLog("TTS Speech Synthesis Online")
+                Log.d("JARVIS", "TTS Engine successfully initialized in $savedLanguage.")
+                viewModel.addLog("TTS Speech Synthesis Online ($savedLanguage)")
                 
                 tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
                     override fun onStart(utteranceId: String?) {
@@ -178,15 +187,20 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
                 speechRecognizer?.cancel()
             } catch (e: Exception) {}
 
-            // Dynamically load voice settings pitch and rate modulation from database (memoriesState)
             val memories = viewModel.memoriesState.value
-            val pitchStr = memories.firstOrNull { it.key == "voice_pitch" }?.value
-            val rateStr = memories.firstOrNull { it.key == "voice_rate" }?.value
+            val voiceStudio = viewModel.voiceStudioManager
+            if (voiceStudio.isMuted.value) {
+                Log.d("JARVIS", "Speech synthesis was skipped: Voice Studio is muted.")
+                return
+            }
 
-            val pitch = pitchStr?.toFloatOrNull() ?: 0.85f // butler deep pitch default
-            val rate = rateStr?.toFloatOrNull() ?: 1.05f   // butler speed default
+            val pitch = voiceStudio.getCalculatedPitch()
+            val rate = voiceStudio.getCalculatedRate()
+            val voiceLanguage = voiceStudio.currentLanguage.value
 
             try {
+                val locale = if (voiceLanguage.lowercase().contains("tamil")) java.util.Locale("ta", "IN") else java.util.Locale.US
+                tts?.setLanguage(locale)
                 tts?.setPitch(pitch)
                 tts?.setSpeechRate(rate)
             } catch (e: Exception) {
@@ -196,7 +210,7 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
             // Name Privacy sanitization in voice responses
             val userName = memories.firstOrNull { 
                 it.key.lowercase().contains("user name") || it.key.lowercase() == "user_name"
-            }?.value ?: "Ranjan"
+            }?.value ?: ""
             val lastUserMsg = viewModel.conversationState.value.lastOrNull { it.sender == "USER" }?.text ?: ""
             val explicit = com.example.service.JarvisCommandProcessor.isExplicitNameRequest(lastUserMsg)
             val nameUsageEnabled = viewModel.nameUsageEnabled.value
@@ -658,11 +672,90 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
 
     private var isFlashlightOn = false
 
+    fun launchAppByName(appName: String): Boolean {
+        val pm = packageManager
+        val packages = pm.getInstalledApplications(PackageManager.GET_META_DATA) ?: emptyList()
+        // First try label searches using robust integer indices
+        for (i in 0 until packages.size) {
+            val appInfo = packages[i]
+            val label = appInfo.loadLabel(pm).toString().lowercase(java.util.Locale.US).trim()
+            if (label == appName.lowercase(java.util.Locale.US).trim() || label.contains(appName.lowercase(java.util.Locale.US).trim())) {
+                val intent = pm.getLaunchIntentForPackage(appInfo.packageName)
+                if (intent != null) {
+                    intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                    startActivity(intent)
+                    return true
+                }
+            }
+        }
+        // Next try package matches
+        for (i in 0 until packages.size) {
+            val appInfo = packages[i]
+            val pkg = appInfo.packageName.lowercase(java.util.Locale.US)
+            if (pkg.contains(appName.lowercase(java.util.Locale.US).trim())) {
+                val intent = pm.getLaunchIntentForPackage(appInfo.packageName)
+                if (intent != null) {
+                    intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                    startActivity(intent)
+                    return true
+                }
+            }
+        }
+        return false
+    }
+
     fun executeSystemProtocol(protocol: String) {
         val cleaned = protocol.trim().uppercase()
         viewModel.addLog("Triggering Protocol: $cleaned")
         try {
             when {
+                cleaned.startsWith("OPEN_APP:") -> {
+                    val appName = protocol.trim().substringAfter("OPEN_APP:").trim()
+                    val success = launchAppByName(appName)
+                    if (success) {
+                        viewModel.addLog("Automation: Launched Installed App '$appName'")
+                    } else {
+                        viewModel.addLog("Automation: App '$appName' label not found. Checking fallback presets...")
+                        val fallbackSuccess = when (appName.lowercase(java.util.Locale.US)) {
+                            "calculator", "calc" -> {
+                                val calcIntent = Intent(Intent.ACTION_MAIN).apply {
+                                    addCategory(Intent.CATEGORY_APP_CALCULATOR)
+                                    flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                                }
+                                try {
+                                    startActivity(calcIntent)
+                                    true
+                                } catch (e: Exception) {
+                                    false
+                                }
+                            }
+                            "camera" -> {
+                                executeSystemProtocol("OPEN_CAMERA")
+                                true
+                            }
+                            "gallery" -> {
+                                executeSystemProtocol("OPEN_GALLERY")
+                                true
+                            }
+                            "contacts" -> {
+                                val contactsIntent = Intent(Intent.ACTION_VIEW, android.provider.ContactsContract.Contacts.CONTENT_URI).apply {
+                                    flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                                }
+                                try {
+                                    startActivity(contactsIntent)
+                                    true
+                                } catch (e: Exception) {
+                                    false
+                                }
+                            }
+                            else -> false
+                        }
+                        if (!fallbackSuccess) {
+                            viewModel.addLog("Automation: Local package and category checks failed for '$appName'. No browser fallback.")
+                            speakAloud("I couldn't locate any matching application for '$appName' installed on your device, Ranjan.")
+                        }
+                    }
+                }
                 cleaned.contains("LAUNCH_GOOGLE_SEARCH") -> {
                     val intent = Intent(Intent.ACTION_WEB_SEARCH)
                     intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
@@ -855,6 +948,133 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
                     audioManager.ringerMode = AudioManager.RINGER_MODE_SILENT
                     viewModel.addLog("Automation: Sound Core Set to Silent Mode")
                 }
+                cleaned.contains("OPEN_WIFI_SETTINGS") -> {
+                    val intent = Intent(Settings.ACTION_WIFI_SETTINGS)
+                    intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                    startActivity(intent)
+                    viewModel.addLog("Automation: Wi-Fi Settings panel loaded")
+                }
+                cleaned.contains("OPEN_MOBILE_DATA_SETTINGS") -> {
+                    val intent = Intent(Settings.ACTION_DATA_ROAMING_SETTINGS)
+                    intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                    startActivity(intent)
+                    viewModel.addLog("Automation: Mobile Data Settings panel loaded")
+                }
+                cleaned.contains("OPEN_BLUETOOTH_SETTINGS") -> {
+                    val intent = Intent(Settings.ACTION_BLUETOOTH_SETTINGS)
+                    intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                    startActivity(intent)
+                    viewModel.addLog("Automation: Bluetooth Settings panel loaded")
+                }
+                cleaned.contains("OPEN_GALLERY") -> {
+                    val intent = Intent(Intent.ACTION_VIEW).apply {
+                        type = "image/*"
+                        flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                    }
+                    try {
+                        startActivity(intent)
+                        viewModel.addLog("Automation: Device Image Gallery Launched")
+                    } catch (ex: Exception) {
+                        try {
+                            val fallback = Intent(Intent.ACTION_GET_CONTENT).apply {
+                                type = "image/*"
+                                flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                            }
+                            startActivity(fallback)
+                            viewModel.addLog("Automation: Device Image Selector Launched")
+                        } catch (e2: Exception) {
+                            viewModel.addLog("Automation Error: Gallery unsupported")
+                        }
+                    }
+                }
+                cleaned.contains("OPEN_CONTACTS") -> {
+                    try {
+                        val intent = Intent(Intent.ACTION_VIEW, android.provider.ContactsContract.Contacts.CONTENT_URI)
+                        intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                        startActivity(intent)
+                        viewModel.addLog("Automation: System Contacts Application Launched")
+                    } catch (ex: Exception) {
+                        viewModel.addLog("Automation Error: Contacts library not accessible")
+                    }
+                }
+                cleaned.contains("OPEN_CALCULATOR") -> {
+                    var launched = false
+                    val calcPackages = listOf(
+                        "com.android.calculator2",
+                        "com.google.android.calculator",
+                        "com.sec.android.app.popupcalculator",
+                        "com.huawei.android.totemweather"
+                    )
+                    for (pkg in calcPackages) {
+                        val launchIntent = packageManager.getLaunchIntentForPackage(pkg)
+                        if (launchIntent != null) {
+                            launchIntent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                            startActivity(launchIntent)
+                            launched = true
+                            break
+                        }
+                    }
+                    if (!launched) {
+                        val intent = Intent(Intent.ACTION_MAIN).apply {
+                            addCategory(Intent.CATEGORY_APP_CALCULATOR)
+                            flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                        }
+                        try {
+                            startActivity(intent)
+                            launched = true
+                        } catch (ex: Exception) {
+                            val webIntent = Intent(Intent.ACTION_VIEW, android.net.Uri.parse("https://www.google.com/search?q=calculator"))
+                            webIntent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                            startActivity(webIntent)
+                        }
+                    }
+                    viewModel.addLog("Automation: System Calculator Activated")
+                }
+                cleaned.contains("OPEN_CLOCK") -> {
+                    try {
+                        val intent = Intent(android.provider.AlarmClock.ACTION_SHOW_ALARMS)
+                        intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                        startActivity(intent)
+                    } catch (ex: Exception) {
+                        try {
+                            val settingsClock = Intent(Settings.ACTION_DATE_SETTINGS)
+                            settingsClock.flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                            startActivity(settingsClock)
+                        } catch (e2: Exception) {
+                            viewModel.addLog("Automation Error: Clock unsupported")
+                        }
+                    }
+                    viewModel.addLog("Automation: Intelligent Clock Panel Launched")
+                }
+                cleaned.contains("OPEN_INSTALLED_APPS") -> {
+                    val intent = Intent(Settings.ACTION_APPLICATION_SETTINGS)
+                    intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                    startActivity(intent)
+                    viewModel.addLog("Automation: Installed Applications Panel Open")
+                }
+                cleaned.contains("OPEN_GAME") -> {
+                    var launchedGame = false
+                    val gameLauncherPackages = listOf(
+                        "com.google.android.play.games",
+                        "com.samsung.android.game.gamehome",
+                        "com.sec.android.app.gamebox"
+                    )
+                    for (pkg in gameLauncherPackages) {
+                        val launchIntent = packageManager.getLaunchIntentForPackage(pkg)
+                        if (launchIntent != null) {
+                            launchIntent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                            startActivity(launchIntent)
+                            launchedGame = true
+                            break
+                        }
+                    }
+                    if (!launchedGame) {
+                        val webIntent = Intent(Intent.ACTION_VIEW, android.net.Uri.parse("https://quickplay.google.com"))
+                        webIntent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                        startActivity(webIntent)
+                    }
+                    viewModel.addLog("Automation: Gaming Arena System Loaded")
+                }
             }
         } catch (e: Exception) {
             viewModel.addLog("Automation Sys Error: ${e.localizedMessage}")
@@ -886,6 +1106,8 @@ fun JarvisDashboardScreen(
     val automationLogs by viewModel.automationLogs.collectAsStateWithLifecycle()
     val parseResult by viewModel.codingAnalysisResult.collectAsStateWithLifecycle()
     val isAnalyzingCode by viewModel.isAnalyzingCode.collectAsStateWithLifecycle()
+    val ownerSetupComplete by viewModel.multiUserSecuritySystem.ownerSetupComplete.collectAsStateWithLifecycle()
+    val currentRole by viewModel.multiUserSecuritySystem.currentRole.collectAsStateWithLifecycle()
 
     var activeTab by remember { mutableIntStateOf(0) }
     var textMessage by remember { mutableStateOf("") }
@@ -936,7 +1158,10 @@ fun JarvisDashboardScreen(
 
     val activity = context as? MainActivity
 
-    Scaffold(
+    if (!ownerSetupComplete) {
+        OwnerBiometricSetupScreen(viewModel = viewModel)
+    } else {
+        Scaffold(
         modifier = Modifier
             .fillMaxSize()
             .pointerInput(isSpeaking) {
@@ -964,11 +1189,13 @@ fun JarvisDashboardScreen(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     val tabs = listOf(
-                        Triple(0, "CHAT", Icons.Default.PlayArrow), // Main Voice Console
-                        Triple(1, "VISION AI", Icons.Default.Search), // Optics Study Helper
-                        Triple(2, "SCHEDULE", Icons.Default.List), // Tasks & Knowledge Base
-                        Triple(3, "MEMORIES", Icons.Default.Info), // Profile & Memories List
-                        Triple(4, "SYSTEM", Icons.Default.Settings) // Collaborative multi-agents, Watchdogs & Plugins
+                        Triple(0, "CHAT", Icons.Default.PlayArrow),
+                        Triple(1, "VISION", Icons.Default.Search),
+                        Triple(2, "SCHEDULE", Icons.Default.List),
+                        Triple(3, "VOICES", Icons.Default.Face),
+                        Triple(4, "MEMORIES", Icons.Default.Info),
+                        Triple(5, "SYSTEM", Icons.Default.Settings),
+                        Triple(6, "AGENT", Icons.Default.Star)
                     )
                     tabs.forEach { (index, title, icon) ->
                         val isSelected = activeTab == index
@@ -976,7 +1203,7 @@ fun JarvisDashboardScreen(
                             modifier = Modifier
                                 .clip(RoundedCornerShape(12.dp))
                                 .clickable { activeTab = index }
-                                .padding(vertical = 6.dp, horizontal = 10.dp)
+                                .padding(vertical = 4.dp, horizontal = 4.dp)
                                 .testTag("tab_$index"),
                             horizontalAlignment = Alignment.CenterHorizontally
                         ) {
@@ -1093,19 +1320,26 @@ fun JarvisDashboardScreen(
                     2 -> SmartSchedulerTab(
                         viewModel = viewModel
                     )
-                    3 -> PersonalProfileMemoriesTab(
+                    3 -> PremiumVoiceStudioTab(
+                        viewModel = viewModel
+                    )
+                    4 -> PersonalProfileMemoriesTab(
                         viewModel = viewModel,
                         memories = memories,
                         onDeleteMemory = { id -> viewModel.deleteMemory(id) }
                     )
-                    4 -> SystemDiagnosticsTab(
+                    5 -> SystemDiagnosticsTab(
                         viewModel = viewModel,
                         logs = automationLogs
+                    )
+                    6 -> AutonomousAgentTab(
+                        viewModel = viewModel
                     )
                 }
             }
         }
     }
+}
 }
 
 // =================== CONVERSATION TAB ===================
@@ -1265,7 +1499,7 @@ fun ChatConsoleTab(
                     .weight(1f)
                     .testTag("chat_text_input"),
                 placeholder = { Text("Type a message to JARVIS...", color = JarvisTextSecondary, fontSize = 13.sp) },
-                singleLine = true,
+                maxLines = 4,
                 keyboardOptions = KeyboardOptions(
                     imeAction = ImeAction.Send
                 ),
@@ -3449,7 +3683,7 @@ fun PersonalProfileMemoriesTab(
 
         // 2. ADAPTIVE VOICE PERSONALITY ENGINE (AUTONOMOUS COGNITION)
         Text(
-            text = "🔊 ADAPTIVE VOICE COGNITIVE ENGINE:",
+            text = "🔊 CLASSIC AI BUTLER COGNITIVE VOICE ENGINE:",
             fontSize = 11.sp,
             fontWeight = FontWeight.Bold,
             color = JarvisSecondary,
@@ -3464,6 +3698,7 @@ fun PersonalProfileMemoriesTab(
             Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 val activeVoiceStyle by viewModel.activeVoiceStyle.collectAsState()
                 val activeVoiceDesc by viewModel.activeVoiceDesc.collectAsState()
+                val activeVoiceLanguage by viewModel.activeVoiceLanguage.collectAsState()
 
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Box(
@@ -3474,7 +3709,7 @@ fun PersonalProfileMemoriesTab(
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = "AUTONOMOUS VOCAL INTELLIGENCE",
+                        text = "AUTONOMOUS CLASSIC BUTLER TONE",
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Bold,
                         color = JarvisSecondary,
@@ -3483,22 +3718,16 @@ fun PersonalProfileMemoriesTab(
                 }
 
                 Text(
-                    text = "Current Autonomous Voice Profile:",
-                    fontSize = 10.sp,
-                    color = Color.LightGray
-                )
-
-                Text(
-                    text = activeVoiceStyle,
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.ExtraBold,
+                    text = "Vocal Personality: $activeVoiceStyle",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
                     color = Color.White,
                     fontFamily = FontFamily.Monospace
                 )
 
                 Text(
-                    text = "Characteristics: $activeVoiceDesc",
-                    fontSize = 11.sp,
+                    text = "Characteristics: Calm, confident, fast responses, professional ($activeVoiceDesc)",
+                    fontSize = 10.sp,
                     color = JarvisPrimary,
                     fontWeight = FontWeight.SemiBold
                 )
@@ -3506,7 +3735,50 @@ fun PersonalProfileMemoriesTab(
                 HorizontalDivider(color = JarvisSurfaceVariant.copy(alpha = 0.5f), thickness = 0.5.dp)
 
                 Text(
-                    text = "Adaptive style scales automatically in real time based on your emotional prompts, learning pacing triggers, late-night hours, and daily context query length. Manual voice toggle settings are disengaged for maximum natural human conversation flow.",
+                    text = "SELECT ACTIVE BUTLER VOICE LANGUAGE:",
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = Color.White,
+                    fontFamily = FontFamily.Monospace
+                )
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    val languages = listOf("English", "Tamil")
+                    languages.forEach { lang ->
+                        val isSelected = activeVoiceLanguage == lang
+                        Button(
+                            onClick = { 
+                                viewModel.setActiveVoiceLanguage(lang)
+                                val previewText = if (lang == "English") {
+                                    "Vocal alignment complete, Sir. I am ready to assist."
+                                } else {
+                                    "ஐயா, குரல் அமைப்பு வெற்றிகரமாக முடிந்தது."
+                                }
+                                viewModel.speakAloud(previewText)
+                            },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = if (isSelected) JarvisSecondary else Color.DarkGray
+                            ),
+                            modifier = Modifier.weight(1f).height(38.dp),
+                            shape = RoundedCornerShape(8.dp),
+                            contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp)
+                        ) {
+                            Text(
+                                text = if (lang == "English") "🇬🇧 English Butler" else "🇮🇳 Tamil Butler",
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = if (isSelected) Color.Black else Color.White,
+                                fontFamily = FontFamily.Monospace
+                            )
+                        }
+                    }
+                }
+
+                Text(
+                    text = "Note: Pacing and base deep butler pitch are calibrated identically across both languages to preserve the same premium personality traits.",
                     fontSize = 9.sp,
                     color = Color.LightGray,
                     textAlign = TextAlign.Justify,
@@ -3633,6 +3905,8 @@ fun SystemDiagnosticsTab(
     var selectedAgentIndex by remember { mutableStateOf(-1) }
     var activeDiagnosticActionMsg by remember { mutableStateOf<String?>(null) }
     var isVerifyingSystem by remember { mutableStateOf(false) }
+    var showPairingDialogFor by remember { mutableStateOf<com.example.brain.ControlledDevice?>(null) }
+    var pairingPasscode by remember { mutableStateOf("4895") }
 
     // Load stability matrix
     LaunchedEffect(Unit, refreshTicks) {
@@ -4551,6 +4825,280 @@ fun SystemDiagnosticsTab(
                         }
                     }
                 }
+            }
+
+            // =================== SECTION 4: UNIVERSAL REMOTE DEVICE CONTROL MATRIX ===================
+            Spacer(modifier = Modifier.height(12.dp))
+            Text(
+                text = "🛰️ UNIVERSAL REMOTE DEVICE CONTROL MATRIX",
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold,
+                color = JarvisPrimary,
+                fontFamily = FontFamily.Monospace,
+                modifier = Modifier.align(Alignment.Start)
+            )
+
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = JarvisSurface),
+                border = BorderStroke(1.dp, JarvisPrimary.copy(alpha = 0.25f))
+            ) {
+                Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text(
+                        text = "Authorize and monitor remote devices connected via BLE/LAN. Direct control requires accredited handshake authorization.",
+                        fontSize = 10.sp,
+                        color = Color.LightGray,
+                        lineHeight = 14.sp
+                    )
+
+                    val devices by viewModel.deviceControlSystem.devices.collectAsState()
+                    val deviceLogs by viewModel.deviceControlSystem.commandLogs.collectAsState()
+
+                    // Horizontal scrolling devices carousel
+                    androidx.compose.foundation.lazy.LazyRow(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        items(devices.size) { index ->
+                            val device = devices[index]
+                            Card(
+                                modifier = Modifier
+                                    .width(225.dp)
+                                    .border(1.dp, if (device.isAuthorized) JarvisSuccess.copy(alpha = 0.3f) else JarvisSurfaceVariant, RoundedCornerShape(12.dp)),
+                                colors = CardDefaults.cardColors(containerColor = Color.Black),
+                                shape = RoundedCornerShape(12.dp)
+                            ) {
+                                Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(
+                                            text = device.name,
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = Color.White,
+                                            maxLines = 1,
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                        Box(
+                                            modifier = Modifier
+                                                .size(8.dp)
+                                                .clip(CircleShape)
+                                                .background(if (device.isAuthorized) JarvisSuccess else Color.Red)
+                                        )
+                                    }
+
+                                    Text(
+                                        text = "${device.type} • Ping: ${device.latencyMs}ms",
+                                        fontSize = 9.sp,
+                                        color = Color.LightGray
+                                    )
+
+                                    // Device Telemetry Details
+                                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                        Text(text = "CPU: ${device.cpuUsage}% | RAM: ${device.ramUsage}%", fontSize = 8.sp, color = JarvisPrimary)
+                                        Text(text = "Battery Status: ${device.battery}%", fontSize = 8.sp, color = Color.White)
+                                    }
+
+                                    // Secure Connection Toggle
+                                    if (!device.isAuthorized) {
+                                        Button(
+                                            onClick = { showPairingDialogFor = device },
+                                            colors = ButtonDefaults.buttonColors(containerColor = JarvisPrimary),
+                                            shape = RoundedCornerShape(6.dp),
+                                            modifier = Modifier.fillMaxWidth().height(28.dp),
+                                            contentPadding = PaddingValues(0.dp)
+                                        ) {
+                                            Text("PAIR / AUTHORIZE", fontSize = 8.sp, color = Color.Black, fontWeight = FontWeight.Bold)
+                                        }
+                                    } else {
+                                        Button(
+                                            onClick = {
+                                                coroutineScope.launch {
+                                                    viewModel.deviceControlSystem.unpairDevice(device.id)
+                                                }
+                                            },
+                                            colors = ButtonDefaults.buttonColors(containerColor = Color.DarkGray),
+                                            shape = RoundedCornerShape(6.dp),
+                                            modifier = Modifier.fillMaxWidth().height(28.dp),
+                                            contentPadding = PaddingValues(0.dp)
+                                        ) {
+                                            Text("REVOKE CLEARANCE", fontSize = 8.sp, color = Color.White)
+                                        }
+
+                                        // Accompanying Permissions checkbox checklist
+                                        HorizontalDivider(color = JarvisSurfaceVariant.copy(alpha = 0.5f))
+                                        Text(text = "Permissions:", fontSize = 8.sp, fontWeight = FontWeight.Bold, color = JarvisSecondary)
+                                        
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Text("App Launch", fontSize = 8.sp, color = Color.White)
+                                            Switch(
+                                                checked = device.appLaunchingPerm,
+                                                onCheckedChange = { viewModel.deviceControlSystem.modifyPermission(device.id, appLaunch = it) },
+                                                modifier = Modifier.scale(0.6f).height(14.dp)
+                                            )
+                                        }
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Text("Files Buf", fontSize = 8.sp, color = Color.White)
+                                            Switch(
+                                                checked = device.fileTransferPerm,
+                                                onCheckedChange = { viewModel.deviceControlSystem.modifyPermission(device.id, fileTransfer = it) },
+                                                modifier = Modifier.scale(0.6f).height(14.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    HorizontalDivider(color = JarvisSurfaceVariant.copy(alpha = 0.5f))
+
+                    // Command Pipeline Shortcuts Testing Simulator
+                    Text(
+                        text = "🚀 TELEMETRY TRIGGER PIPELINE TESTING SIMULATOR:",
+                        fontSize = 9.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = JarvisSecondary,
+                        fontFamily = FontFamily.Monospace
+                    )
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        listOf(
+                            Triple("Open YouTube on TV", "🎞️ Open TV", "Open YouTube on TV"),
+                            Triple("Launch VS Code on Laptop", "💻 VSCode", "Launch VS Code on Laptop"),
+                            Triple("Transfer file to Desktop", "📁 Sync File", "Transfer file to Desktop")
+                        ).forEach { (action, name, cmd) ->
+                            Button(
+                                onClick = {
+                                    viewModel.sendMessage(cmd, isVoice = false)
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = JarvisSurfaceVariant),
+                                modifier = Modifier.weight(1f).height(32.dp),
+                                shape = RoundedCornerShape(6.dp),
+                                contentPadding = PaddingValues(0.dp)
+                            ) {
+                                Text(name, fontSize = 8.sp, color = Color.White, fontFamily = FontFamily.Monospace)
+                            }
+                        }
+                    }
+
+                    HorizontalDivider(color = JarvisSurfaceVariant.copy(alpha = 0.5f))
+
+                    // Terminal log console output
+                    Text(
+                        text = "🔒 ENCRYPTED CONTROL TRANSACTION METRIC LOG:",
+                        fontSize = 9.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = JarvisPrimary,
+                        fontFamily = FontFamily.Monospace
+                    )
+
+                    Card(
+                        modifier = Modifier.fillMaxWidth().height(100.dp),
+                        colors = CardDefaults.cardColors(containerColor = Color.Black),
+                        border = BorderStroke(1.dp, JarvisSurfaceVariant)
+                    ) {
+                        val consoleScrollState = rememberScrollState()
+                        Column(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .padding(8.dp)
+                                .verticalScroll(consoleScrollState),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            if (deviceLogs.isEmpty()) {
+                                Text(
+                                    text = "> Secure linkage active. Ready for instruction pings...",
+                                    color = Color.Green.copy(alpha = 0.7f),
+                                    fontSize = 8.sp,
+                                    fontFamily = FontFamily.Monospace
+                                )
+                            } else {
+                                deviceLogs.take(15).forEach { log ->
+                                    Text(
+                                        text = "> $log",
+                                        color = if (log.contains("Refusal") || log.contains("Blocked")) Color.Red else Color.Green,
+                                        fontSize = 8.sp,
+                                        fontFamily = FontFamily.Monospace
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Secure Authorization Handshake Dialog Challenge
+            showPairingDialogFor?.let { device ->
+                AlertDialog(
+                    onDismissRequest = { showPairingDialogFor = null },
+                    title = {
+                        Text(
+                            text = "🔐 AUTHORIZE DEVICE LINK",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = JarvisPrimary,
+                            fontFamily = FontFamily.Monospace
+                        )
+                    },
+                    text = {
+                        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                            Text(
+                                text = "Accrediting remote tunnel connection with '${device.name}' OS layer requested verification security handshake passcode confirmation.",
+                                fontSize = 10.sp,
+                                color = Color.LightGray
+                            )
+                            OutlinedTextField(
+                                value = pairingPasscode,
+                                onValueChange = { pairingPasscode = it },
+                                label = { Text("Asymmetric Passcode Challenge", fontSize = 8.sp) },
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedTextColor = Color.White,
+                                    unfocusedTextColor = Color.White,
+                                    focusedBorderColor = JarvisPrimary
+                                ),
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        }
+                    },
+                    confirmButton = {
+                        Button(
+                            onClick = {
+                                coroutineScope.launch {
+                                    viewModel.deviceControlSystem.pairDevice(device.id)
+                                    showPairingDialogFor = null
+                                }
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = JarvisPrimary)
+                        ) {
+                            Text("GRANT ACCESS", fontSize = 9.sp, color = Color.Black)
+                        }
+                    },
+                    dismissButton = {
+                        Button(
+                            onClick = { showPairingDialogFor = null },
+                            colors = ButtonDefaults.buttonColors(containerColor = Color.DarkGray)
+                        ) {
+                            Text("DENY Connection", fontSize = 9.sp, color = Color.White)
+                        }
+                    },
+                    containerColor = Color(0xFF161518),
+                    shape = RoundedCornerShape(12.dp)
+                )
             }
         }
     }
