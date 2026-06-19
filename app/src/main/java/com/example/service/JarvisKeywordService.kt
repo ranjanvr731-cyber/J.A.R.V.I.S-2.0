@@ -64,6 +64,13 @@ class JarvisKeywordService : Service(), TextToSpeech.OnInitListener {
     private var isThinking = false
     private var isBypassWakeWord = false
     private var porcupineManager: PorcupineManager? = null
+    private var isSpeechRecognizerActive = false
+    private var isWakeLockAcquired = false
+
+    // Advanced Conversation Control Interruption State
+    private var isInterrupted = false
+    private var interruptedText = ""
+    private var lastActiveResponseText = ""
 
     private val database by lazy {
         Room.databaseBuilder(
@@ -148,11 +155,18 @@ class JarvisKeywordService : Service(), TextToSpeech.OnInitListener {
             try {
                 val powerManager = applicationContext.getSystemService(Context.POWER_SERVICE) as PowerManager
                 val tag = "${applicationContext.packageName}:JARVIS::WakeLock"
-                wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, tag).apply {
-                    setReferenceCounted(false)
-                    acquire(5 * 60 * 1000L) // Safe limit to prevent severe battery leaks while satisfying AppOps
+                synchronized(this@JarvisKeywordService) {
+                    if (wakeLock == null) {
+                        wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, tag).apply {
+                            setReferenceCounted(false)
+                        }
+                    }
+                    if (!isWakeLockAcquired) {
+                        wakeLock?.acquire(5 * 60 * 1000L) // Safe limit to prevent severe battery leaks while satisfying AppOps
+                        isWakeLockAcquired = true
+                        Log.d("JARVIS_SERVICE", "Partial WakeLock active with tag $tag.")
+                    }
                 }
-                Log.d("JARVIS_SERVICE", "Partial WakeLock active with tag $tag.")
             } catch (e: Exception) {
                 Log.e("JARVIS_SERVICE", "Failed to acquire wake lock", e)
             }
@@ -161,8 +175,14 @@ class JarvisKeywordService : Service(), TextToSpeech.OnInitListener {
 
     private fun releaseWakeLock() {
         try {
-            if (wakeLock?.isHeld == true) {
-                wakeLock?.release()
+            synchronized(this) {
+                if (isWakeLockAcquired && wakeLock != null) {
+                    if (wakeLock?.isHeld == true) {
+                        wakeLock?.release()
+                    }
+                    isWakeLockAcquired = false
+                    Log.d("JARVIS_SERVICE", "WakeLock released successfully.")
+                }
             }
         } catch (e: Exception) {
             Log.e("JARVIS_SERVICE", "Failed to release system wake lock.", e)
@@ -203,7 +223,7 @@ class JarvisKeywordService : Service(), TextToSpeech.OnInitListener {
 
     private fun initializeSpeechRecognizer() {
         try {
-            speechRecognizer = SpeechRecognizer.createSpeechRecognizer(applicationContext).apply {
+            speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this@JarvisKeywordService).apply {
                 setRecognitionListener(object : RecognitionListener {
                     override fun onReadyForSpeech(params: android.os.Bundle?) {
                         Log.d("JARVIS_SERVICE", "Recognizer core synchronized.")
@@ -227,6 +247,7 @@ class JarvisKeywordService : Service(), TextToSpeech.OnInitListener {
                     }
 
                     override fun onError(error: Int) {
+                        isSpeechRecognizerActive = false
                         val message = when (error) {
                             SpeechRecognizer.ERROR_AUDIO -> "Audio recording error"
                             SpeechRecognizer.ERROR_CLIENT -> "Client-side context error"
@@ -252,6 +273,7 @@ class JarvisKeywordService : Service(), TextToSpeech.OnInitListener {
                     }
 
                     override fun onResults(results: android.os.Bundle?) {
+                        isSpeechRecognizerActive = false
                         val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                         val spokenText = matches?.firstOrNull() ?: ""
                         if (spokenText.isNotBlank()) {
@@ -268,6 +290,7 @@ class JarvisKeywordService : Service(), TextToSpeech.OnInitListener {
             }
         } catch (e: Exception) {
             Log.e("JARVIS_SERVICE", "Speech recognizer instantiation failed.", e)
+            isSpeechRecognizerActive = false
         }
     }
 
@@ -357,7 +380,10 @@ class JarvisKeywordService : Service(), TextToSpeech.OnInitListener {
         isBypassWakeWord = bypassWakeWord
         serviceScope.launch {
             try {
-                speechRecognizer?.cancel()
+                if (isSpeechRecognizerActive) {
+                    speechRecognizer?.cancel()
+                    isSpeechRecognizerActive = false
+                }
             } catch (e: Exception) {}
 
             if (!bypassWakeWord) {
@@ -389,8 +415,10 @@ class JarvisKeywordService : Service(), TextToSpeech.OnInitListener {
             try {
                 stopPorcupineQuietly()
                 speechRecognizer?.startListening(intent)
+                isSpeechRecognizerActive = true
                 Log.d("JARVIS_SERVICE", "Standard speech recognizer started. (BypassWakeWord=$bypassWakeWord)")
             } catch (e: Exception) {
+                isSpeechRecognizerActive = false
                 Log.e("JARVIS_SERVICE", "Start listening threw hardware error", e)
                 restartListeningIfHandsFree()
             }
@@ -427,9 +455,14 @@ class JarvisKeywordService : Service(), TextToSpeech.OnInitListener {
     private fun speakResponse(text: String) {
         if (!isTtsInitialized || tts == null) return
 
+        lastActiveResponseText = text
+
         serviceScope.launch {
             try {
-                speechRecognizer?.cancel()
+                if (isSpeechRecognizerActive) {
+                    speechRecognizer?.cancel()
+                    isSpeechRecognizerActive = false
+                }
             } catch (e: Exception) {}
 
             isCurrentlySpeaking = true
@@ -472,12 +505,24 @@ class JarvisKeywordService : Service(), TextToSpeech.OnInitListener {
 
             try {
                 tts?.speak(sanitizedText, TextToSpeech.QUEUE_FLUSH, null, "jarvis_service_session")
+                serviceScope.launch {
+                    delay(400)
+                    if (!isSpeechRecognizerActive) {
+                        startSpeechRecognizerListening(bypassWakeWord = true)
+                    }
+                }
             } catch (e: Exception) {
                 Log.e("JARVIS_SERVICE", "TTS Session crash recovered, fallback to default", e)
                 try {
                     tts?.setPitch(1.0f)
                     tts?.setSpeechRate(1.0f)
                     tts?.speak(sanitizedText, TextToSpeech.QUEUE_FLUSH, null, "jarvis_service_session")
+                    serviceScope.launch {
+                        delay(400)
+                        if (!isSpeechRecognizerActive) {
+                            startSpeechRecognizerListening(bypassWakeWord = true)
+                        }
+                    }
                 } catch (err: Exception) {
                     Log.e("JARVIS_SERVICE", "TTS Critical fallback failed entirely.", err)
                 }
@@ -485,7 +530,99 @@ class JarvisKeywordService : Service(), TextToSpeech.OnInitListener {
         }
     }
 
+    private fun handleInterruptionFlow(spokenText: String, bypassWakeWord: Boolean): Boolean {
+        val lower = spokenText.lowercase(Locale.US).trim().removeSuffix(".").removeSuffix("?").trim()
+        val isInterruptCommand = lower == "wait" || lower == "stop" || lower == "hold on" || lower == "listen"
+        val isResumeCommand = lower == "continue" || lower == "resume"
+
+        if (isInterruptCommand) {
+            isInterrupted = true
+            interruptedText = spokenText
+            addLogToDatabase("Voice Interruption in background service: Paused. Speak when ready.")
+            try {
+                if (tts?.isSpeaking == true) {
+                    tts?.stop()
+                    isCurrentlySpeaking = false
+                }
+            } catch (e: Exception) {}
+            serviceScope.launch {
+                delay(300)
+                startSpeechRecognizerListening(bypassWakeWord = true)
+            }
+            return true
+        }
+
+        if (isResumeCommand) {
+            if (lastActiveResponseText.isNotEmpty()) {
+                isInterrupted = false
+                interruptedText = ""
+                speakResponse(lastActiveResponseText)
+                insertConversationMessage("Command: User requested resume in background.", isUser = true)
+            } else {
+                speakResponse("Nothing to resume, Bro.")
+            }
+            return true
+        }
+
+        if (isInterrupted && interruptedText.isNotEmpty()) {
+            val prev = interruptedText
+            isInterrupted = false
+            interruptedText = ""
+            val combined = "$prev. $spokenText"
+            executeNormalSpokenText(combined, bypassWakeWord = true)
+            return true
+        }
+
+        return false
+    }
+
     private fun handleSpokenText(spokenText: String, bypassWakeWord: Boolean) {
+        if (handleInterruptionFlow(spokenText, bypassWakeWord)) {
+            return
+        }
+        val lowerTextToCheck = spokenText.lowercase(Locale.US).trim()
+        val wakeWord1 = "hey jarvis"
+        val wakeWord2 = "jarvis"
+        val isWakeWordDetected = lowerTextToCheck.contains(wakeWord1) || lowerTextToCheck.contains(wakeWord2)
+        var commandTextToCheck = spokenText
+        if (!bypassWakeWord) {
+            if (isWakeWordDetected) {
+                if (lowerTextToCheck.startsWith(wakeWord1)) {
+                    commandTextToCheck = spokenText.substring(wakeWord1.length).trim().removePrefix(",").trim()
+                } else if (lowerTextToCheck.startsWith(wakeWord2)) {
+                    commandTextToCheck = spokenText.substring(wakeWord2.length).trim().removePrefix(",").trim()
+                }
+            }
+        }
+
+        val speechInput = commandTextToCheck.lowercase(Locale.US).trim().removeSuffix(".").removeSuffix("?").trim()
+        val spokenHash = com.example.messenger.SecretCrypto.hashString(speechInput)
+        val defaultSpokenHash = com.example.messenger.SecretCrypto.hashString("open sesame")
+
+        serviceScope.launch {
+            val secretDb = com.example.messenger.SecretDatabase.getDatabase(applicationContext)
+            val config = secretDb.secretDao().getConfigDirect()
+            val matchesSecretVoice = if (config != null && config.voicePhraseHash.isNotEmpty()) {
+                config.voicePhraseHash == spokenHash
+            } else {
+                spokenHash == defaultSpokenHash
+            }
+
+            if (matchesSecretVoice) {
+                addLogToDatabase("Stealth voice trigger detected in background service! Directing launch intent.")
+                val launchIntent = Intent(applicationContext, com.example.MainActivity::class.java).apply {
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
+                    putExtra("SECRET_NOTIFICATION_TAP", true)
+                }
+                startActivity(launchIntent)
+                restartListeningIfHandsFree()
+            } else {
+                executeNormalSpokenText(spokenText, bypassWakeWord)
+            }
+        }
+    }
+
+    private fun executeNormalSpokenText(spokenText: String, bypassWakeWord: Boolean) {
         val lowerText = spokenText.lowercase(Locale.US)
         val wakeWord1 = "hey jarvis"
         val wakeWord2 = "jarvis"

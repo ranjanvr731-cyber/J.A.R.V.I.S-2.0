@@ -80,13 +80,16 @@ import com.example.ui.PremiumVoiceStudioTab
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
 import java.util.Locale
+import androidx.lifecycle.lifecycleScope
 
 class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
 
     private val viewModel: JarvisViewModel by viewModels()
+    private val secretViewModel: com.example.messenger.SecretMessengerViewModel by viewModels()
     private var tts: TextToSpeech? = null
     private var isTtsInitialized = false
     private var speechRecognizer: android.speech.SpeechRecognizer? = null
+    private var isSpeechRecognizerActive = false
 
     private val requestPermissionsLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -127,14 +130,36 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
             requestPermissionsLauncher.launch(permissionsToRequest.toTypedArray())
         }
 
+        val openSecret = intent?.getBooleanExtra("SECRET_NOTIFICATION_TAP", false) == true
+        if (openSecret) {
+            secretViewModel.setPasscodeScreenVisible(true)
+        }
+
         setContent {
             MyApplicationTheme {
-                // Main screen layout
-                JarvisDashboardScreen(
-                    viewModel = viewModel,
-                    onStartSpeechRecognition = { startSpeechToText() }
-                )
+                Box(modifier = androidx.compose.ui.Modifier.fillMaxSize()) {
+                    // Main screen layout
+                    JarvisDashboardScreen(
+                        viewModel = viewModel,
+                        onStartSpeechRecognition = { startSpeechToText() }
+                    )
+
+                    // Overlay Secret Messenger when triggered
+                    com.example.messenger.SecretMessengerRootContainer(
+                        viewModel = secretViewModel,
+                        onClose = {}
+                    )
+                }
             }
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        val openSecret = intent.getBooleanExtra("SECRET_NOTIFICATION_TAP", false)
+        if (openSecret) {
+            secretViewModel.setPasscodeScreenVisible(true)
         }
     }
 
@@ -184,7 +209,10 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
         if (isTtsInitialized) {
             // Cancel active speech recognizer listening so it doesn't record own spoken voice
             try {
-                speechRecognizer?.cancel()
+                if (isSpeechRecognizerActive) {
+                    speechRecognizer?.cancel()
+                    isSpeechRecognizerActive = false
+                }
             } catch (e: Exception) {}
 
             val memories = viewModel.memoriesState.value
@@ -224,12 +252,26 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
 
             try {
                 tts?.speak(sanitizedText, TextToSpeech.QUEUE_FLUSH, null, "jarvis_session")
+                if (viewModel.handsFreeEnabled.value) {
+                    window.decorView.postDelayed({
+                        if (!isSpeechRecognizerActive) {
+                            startSpeechToText()
+                        }
+                    }, 400)
+                }
             } catch (e: Exception) {
                 Log.e("JARVIS", "TTS Session crash recovered, fallback to default", e)
                 try {
                     tts?.setPitch(1.0f)
                     tts?.setSpeechRate(1.0f)
                     tts?.speak(sanitizedText, TextToSpeech.QUEUE_FLUSH, null, "jarvis_session")
+                    if (viewModel.handsFreeEnabled.value) {
+                        window.decorView.postDelayed({
+                            if (!isSpeechRecognizerActive) {
+                                startSpeechToText()
+                            }
+                        }, 400)
+                    }
                 } catch (err: Exception) {
                     Log.e("JARVIS", "TTS Critical fallback failed entirely.", err)
                 }
@@ -259,7 +301,7 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
         runOnUiThread {
             try {
                 if (android.speech.SpeechRecognizer.isRecognitionAvailable(this)) {
-                    speechRecognizer = android.speech.SpeechRecognizer.createSpeechRecognizer(applicationContext).apply {
+                    speechRecognizer = android.speech.SpeechRecognizer.createSpeechRecognizer(this@MainActivity).apply {
                         setRecognitionListener(object : android.speech.RecognitionListener {
                             override fun onReadyForSpeech(params: Bundle?) {
                                 Log.d("JARVIS", "SpeechRecognizer Ready")
@@ -285,6 +327,7 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
                             }
 
                             override fun onError(error: Int) {
+                                isSpeechRecognizerActive = false
                                 val message = when (error) {
                                     android.speech.SpeechRecognizer.ERROR_AUDIO -> "Audio recording error"
                                     android.speech.SpeechRecognizer.ERROR_CLIENT -> "Client side error"
@@ -316,6 +359,7 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
                             }
 
                             override fun onResults(results: Bundle?) {
+                                isSpeechRecognizerActive = false
                                 val matches = results?.getStringArrayList(android.speech.SpeechRecognizer.RESULTS_RECOGNITION)
                                 val spokenText = matches?.firstOrNull() ?: ""
                                 if (spokenText.isNotBlank()) {
@@ -341,7 +385,95 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
         }
     }
 
+    private fun handleInterruptionFlow(spokenText: String): Boolean {
+        val lower = spokenText.lowercase(java.util.Locale.US).trim().removeSuffix(".").removeSuffix("?").trim()
+        val isInterruptCommand = lower == "wait" || lower == "stop" || lower == "hold on" || lower == "listen"
+        val isResumeCommand = lower == "continue" || lower == "resume"
+
+        if (isInterruptCommand) {
+            viewModel.isInterrupted.value = true
+            viewModel.interruptedText.value = spokenText
+            viewModel.addLog("Voice Interruption: Speaking paused. Ready for user input.")
+            runOnUiThread {
+                try {
+                    if (tts?.isSpeaking == true) {
+                        tts?.stop()
+                        viewModel.setSpeaking(false)
+                    }
+                } catch (e: Exception) {}
+                window.decorView.postDelayed({
+                    startSpeechToText()
+                }, 300)
+            }
+            return true
+        }
+
+        if (isResumeCommand) {
+            val lastText = viewModel.lastActiveResponseText
+            if (lastText.isNotEmpty()) {
+                viewModel.isInterrupted.value = false
+                viewModel.interruptedText.value = ""
+                speakAloud("Resuming: $lastText")
+                viewModel.sendMessage("Command: User requested resume.", isVoice = true)
+            } else {
+                speakAloud("Nothing to resume, Bro.")
+            }
+            return true
+        }
+
+        if (viewModel.isInterrupted.value && viewModel.interruptedText.value.isNotEmpty()) {
+            val prev = viewModel.interruptedText.value
+            viewModel.isInterrupted.value = false
+            viewModel.interruptedText.value = ""
+            val combined = "$prev. $spokenText"
+            executeNormalSpokenText(combined)
+            return true
+        }
+
+        return false
+    }
+
     private fun handleSpokenText(spokenText: String) {
+        if (handleInterruptionFlow(spokenText)) {
+            return
+        }
+        val lowerText = spokenText.lowercase().trim()
+        val wakeWord1 = "hey jarvis"
+        val wakeWord2 = "jarvis"
+        val isWakeWordDetected = lowerText.contains(wakeWord1) || lowerText.contains(wakeWord2)
+        var commandText = spokenText
+        if (viewModel.handsFreeEnabled.value) {
+            if (isWakeWordDetected) {
+                if (lowerText.startsWith(wakeWord1)) {
+                    commandText = spokenText.substring(wakeWord1.length).trim().removePrefix(",").trim()
+                } else if (lowerText.startsWith(wakeWord2)) {
+                    commandText = spokenText.substring(wakeWord2.length).trim().removePrefix(",").trim()
+                }
+            }
+        }
+
+        val speechInput = commandText.lowercase().trim().removeSuffix(".").removeSuffix("?").trim()
+        val spokenHash = com.example.messenger.SecretCrypto.hashString(speechInput)
+        val defaultSpokenHash = com.example.messenger.SecretCrypto.hashString("open sesame")
+
+        lifecycleScope.launch {
+            val config = secretViewModel.dao.getConfigDirect()
+            val matchesSecretVoice = if (config != null && config.voicePhraseHash.isNotEmpty()) {
+                config.voicePhraseHash == spokenHash
+            } else {
+                spokenHash == defaultSpokenHash
+            }
+
+            if (matchesSecretVoice) {
+                secretViewModel.setPasscodeScreenVisible(true)
+                restartListeningIfHandsFree()
+            } else {
+                executeNormalSpokenText(spokenText)
+            }
+        }
+    }
+
+    private fun executeNormalSpokenText(spokenText: String) {
         val lowerText = spokenText.lowercase().trim()
         val wakeWord1 = "hey jarvis"
         val wakeWord2 = "jarvis"
@@ -564,7 +696,10 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
             }
             try {
                 if (speechRecognizer != null) {
-                    speechRecognizer?.cancel()
+                    if (isSpeechRecognizerActive) {
+                        speechRecognizer?.cancel()
+                        isSpeechRecognizerActive = false
+                    }
                     speechRecognizer?.destroy()
                     speechRecognizer = null
                 }
@@ -613,8 +748,11 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
     fun stopListening() {
         runOnUiThread {
             try {
-                speechRecognizer?.stopListening()
-                speechRecognizer?.cancel()
+                if (isSpeechRecognizerActive) {
+                    speechRecognizer?.stopListening()
+                    speechRecognizer?.cancel()
+                    isSpeechRecognizerActive = false
+                }
                 viewModel.addLog("Telemetry Check: Background Audio Listener Muted")
             } catch (e: Exception) {
                 Log.e("JARVIS", "Error stopping SpeechRecognizer", e)
@@ -644,10 +782,15 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
                 putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
             }
             try {
-                speechRecognizer?.cancel()
+                if (isSpeechRecognizerActive) {
+                    speechRecognizer?.cancel()
+                    isSpeechRecognizerActive = false
+                }
                 speechRecognizer?.startListening(intent)
+                isSpeechRecognizerActive = true
                 Log.d("JARVIS", "SpeechRecognizer listening initiated.")
             } catch (e: Exception) {
+                isSpeechRecognizerActive = false
                 Log.e("JARVIS", "Error starting speech recognizer", e)
                 viewModel.addLog("Listen Core Error: ${e.localizedMessage}")
                 try {
@@ -1097,6 +1240,8 @@ fun JarvisDashboardScreen(
     onStartSpeechRecognition: () -> Unit
 ) {
     val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
+    val secretViewModel: com.example.messenger.SecretMessengerViewModel = androidx.lifecycle.viewmodel.compose.viewModel()
     val conversation by viewModel.conversationState.collectAsStateWithLifecycle()
     val memories by viewModel.memoriesState.collectAsStateWithLifecycle()
     val isThinking by viewModel.isThinking.collectAsStateWithLifecycle()
@@ -1309,7 +1454,24 @@ fun JarvisDashboardScreen(
                         isSpeaking = isSpeaking,
                         backgroundListening = backgroundListening,
                         handsFreeEnabled = handsFreeEnabled,
-                        onMessageSent = { msg -> viewModel.sendMessage(msg, isVoice = true) },
+                        onMessageSent = { msg ->
+                            coroutineScope.launch {
+                                val config = secretViewModel.dao.getConfigDirect()
+                                val codeHash = com.example.messenger.SecretCrypto.hashString(msg)
+                                val defaultCodeHash = com.example.messenger.SecretCrypto.hashString("*#777#")
+                                val matchesSecret = if (config != null && config.textCodeHash.isNotEmpty()) {
+                                    config.textCodeHash == codeHash
+                                } else {
+                                    codeHash == defaultCodeHash
+                                }
+
+                                if (matchesSecret) {
+                                    secretViewModel.setPasscodeScreenVisible(true)
+                                } else {
+                                    viewModel.sendMessage(msg, isVoice = true)
+                                }
+                            }
+                        },
                         onStartSpeech = onStartSpeechRecognition,
                         onToggleListening = { viewModel.setBackgroundListening(!backgroundListening) },
                         onToggleHandsFree = { viewModel.setHandsFreeEnabled(!handsFreeEnabled) }
@@ -5099,6 +5261,133 @@ fun SystemDiagnosticsTab(
                     containerColor = Color(0xFF161518),
                     shape = RoundedCornerShape(12.dp)
                 )
+            }
+        }
+    }
+}
+
+@Composable
+fun OwnerBiometricSetupScreen(viewModel: JarvisViewModel) {
+    val coroutineScope = rememberCoroutineScope()
+    var nickname by remember { mutableStateOf("Sir") }
+    var voicePrintPhrase by remember { mutableStateOf("My voice is my fingerprint signature") }
+    var biometricAuthenticating by remember { mutableStateOf(false) }
+    var messageText by remember { mutableStateOf("") }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color(0xFF0F0E11))
+            .padding(24.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .widthIn(max = 480.dp)
+                .background(Color(0xFF161519), shape = RoundedCornerShape(24.dp))
+                .border(BorderStroke(1.dp, JarvisPrimary.copy(alpha = 0.5f)), shape = RoundedCornerShape(24.dp))
+                .padding(24.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            // Elegant Cosmic Icon Ring
+            Box(
+                modifier = Modifier
+                    .size(64.dp)
+                    .background(JarvisPrimary.copy(alpha = 0.1f), shape = CircleShape)
+                    .border(BorderStroke(2.dp, JarvisPrimary), shape = CircleShape),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Lock,
+                    contentDescription = "Security Vault",
+                    tint = JarvisPrimary,
+                    modifier = Modifier.size(32.dp)
+                )
+            }
+
+            Text(
+                text = "JARVIS CORES BIOMETRIC SEEDING",
+                fontSize = 16.sp,
+                fontWeight = FontWeight.Bold,
+                color = JarvisPrimary,
+                fontFamily = FontFamily.Monospace,
+                textAlign = TextAlign.Center
+            )
+
+            Text(
+                text = "Acknowledge primary owner identity to initialize personal hardware security layers and tie voice decryption keys.",
+                fontSize = 11.sp,
+                color = JarvisTextSecondary,
+                textAlign = TextAlign.Center,
+                lineHeight = 16.sp
+            )
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            OutlinedTextField(
+                value = nickname,
+                onValueChange = { nickname = it },
+                label = { Text("Owner Nickname", color = JarvisTextSecondary) },
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedTextColor = Color.White,
+                    unfocusedTextColor = Color.White,
+                    focusedBorderColor = JarvisPrimary,
+                    unfocusedBorderColor = JarvisSurfaceVariant
+                ),
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth().testTag("owner_nickname_input")
+            )
+
+            OutlinedTextField(
+                value = voicePrintPhrase,
+                onValueChange = { voicePrintPhrase = it },
+                label = { Text("Voice Handshake signature phrase", color = JarvisTextSecondary) },
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedTextColor = Color.White,
+                    unfocusedTextColor = Color.White,
+                    focusedBorderColor = JarvisPrimary,
+                    unfocusedBorderColor = JarvisSurfaceVariant
+                ),
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth().testTag("owner_voicephrase_input")
+            )
+
+            if (messageText.isNotEmpty()) {
+                Text(
+                    text = messageText,
+                    fontSize = 10.sp,
+                    color = JarvisSuccess,
+                    fontFamily = FontFamily.Monospace,
+                    textAlign = TextAlign.Center
+                )
+            }
+
+            Button(
+                onClick = {
+                    biometricAuthenticating = true
+                    messageText = "Initiating core synchronization logic..."
+                    coroutineScope.launch {
+                        delay(1200)
+                        viewModel.multiUserSecuritySystem.setSetupComplete(nickname, voicePrintPhrase)
+                        biometricAuthenticating = false
+                        messageText = "Cryptographic signature accepted. Host authenticated."
+                    }
+                },
+                enabled = nickname.isNotBlank() && voicePrintPhrase.isNotBlank() && !biometricAuthenticating,
+                colors = ButtonDefaults.buttonColors(containerColor = JarvisPrimary, disabledContainerColor = Color.DarkGray),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(48.dp)
+                    .testTag("owner_setup_confirm_btn"),
+                shape = RoundedCornerShape(12.dp)
+            ) {
+                if (biometricAuthenticating) {
+                    CircularProgressIndicator(color = Color.Black, modifier = Modifier.size(20.dp))
+                } else {
+                    Text("AUTHORIZE CORE BINDING", color = Color.Black, fontWeight = FontWeight.Bold, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+                }
             }
         }
     }

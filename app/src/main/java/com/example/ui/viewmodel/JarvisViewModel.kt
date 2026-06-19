@@ -94,6 +94,30 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
     private val _handsFreeEnabled = MutableStateFlow(true)
     val handsFreeEnabled: StateFlow<Boolean> = _handsFreeEnabled.asStateFlow()
 
+    private val _verificationEnabled = MutableStateFlow(true)
+    val verificationEnabled: StateFlow<Boolean> = _verificationEnabled.asStateFlow()
+
+    private val _appLockEnabled = MutableStateFlow(false)
+    val appLockEnabled: StateFlow<Boolean> = _appLockEnabled.asStateFlow()
+
+    private val _smartDropEnabled = MutableStateFlow(false)
+    val smartDropEnabled: StateFlow<Boolean> = _smartDropEnabled.asStateFlow()
+
+    private val _discoveryModeActive = MutableStateFlow(false)
+    val discoveryModeActive: StateFlow<Boolean> = _discoveryModeActive.asStateFlow()
+
+    private val _diSize = MutableStateFlow("Medium")
+    val diSize: StateFlow<String> = _diSize.asStateFlow()
+
+    private val _diPosition = MutableStateFlow("Top Center")
+    val diPosition: StateFlow<String> = _diPosition.asStateFlow()
+
+    private val _diColor = MutableStateFlow("Slate Dark")
+    val diColor: StateFlow<String> = _diColor.asStateFlow()
+
+    private val _diAnimationSpeed = MutableStateFlow("Standard Spring")
+    val diAnimationSpeed: StateFlow<String> = _diAnimationSpeed.asStateFlow()
+
     private val _isSpeaking = MutableStateFlow(false)
     val isSpeaking: StateFlow<Boolean> = _isSpeaking.asStateFlow()
 
@@ -109,6 +133,11 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
 
     private val _isAnalyzingCode = MutableStateFlow(false)
     val isAnalyzingCode: StateFlow<Boolean> = _isAnalyzingCode.asStateFlow()
+
+    // Advanced Conversation Control Interruption State
+    val isInterrupted = MutableStateFlow(false)
+    val interruptedText = MutableStateFlow("")
+    var lastActiveResponseText = ""
 
     private val _nameUsageEnabled = MutableStateFlow(false)
     val nameUsageEnabled: StateFlow<Boolean> = _nameUsageEnabled.asStateFlow()
@@ -141,6 +170,27 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                 
                 val savedLang = savedMemories.firstOrNull { it.key == "voice_language" }?.value ?: "English"
                 _activeVoiceLanguage.value = savedLang
+
+                val savedVerification = savedMemories.firstOrNull { it.key == "verification_enabled" }?.value
+                _verificationEnabled.value = (savedVerification != "false")
+
+                val savedAppLock = savedMemories.firstOrNull { it.key == "app_lock_enabled" }?.value
+                _appLockEnabled.value = (savedAppLock == "true")
+
+                val savedSmartDrop = savedMemories.firstOrNull { it.key == "smart_drop_enabled" }?.value
+                _smartDropEnabled.value = (savedSmartDrop == "true")
+
+                val savedDiSize = savedMemories.firstOrNull { it.key == "di_size" }?.value ?: "Medium"
+                _diSize.value = savedDiSize
+
+                val savedDiPos = savedMemories.firstOrNull { it.key == "di_position" }?.value ?: "Top Center"
+                _diPosition.value = savedDiPos
+
+                val savedDiCol = savedMemories.firstOrNull { it.key == "di_color" }?.value ?: "Slate Dark"
+                _diColor.value = savedDiCol
+
+                val savedDiAnim = savedMemories.firstOrNull { it.key == "di_animations" }?.value ?: "Standard Spring"
+                _diAnimationSpeed.value = savedDiAnim
 
                 deviceControlSystem.loadPairingStates(savedMemories)
                 voiceStudioManager.loadVoiceConfigurations(savedMemories)
@@ -265,11 +315,14 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
             }
 
             val diagnostic = selfDiagnosticSystem.runDiagnosticCheck()
-            var responseText = questionAnsweringSystem.processQuestion(
-                query = resolvedText,
-                ramUsage = diagnostic.currentRamFootprint,
-                batteryRate = diagnostic.batteryDrainRate
-            ) ?: ""
+            var responseText = voiceStudioManager.processAutomaticVoiceCommand(resolvedText) ?: ""
+            if (responseText.isBlank()) {
+                responseText = questionAnsweringSystem.processQuestion(
+                    query = resolvedText,
+                    ramUsage = diagnostic.currentRamFootprint,
+                    batteryRate = diagnostic.batteryDrainRate
+                ) ?: ""
+            }
 
             // Intercept for Universal Device Control
             if (responseText.isBlank()) {
@@ -387,6 +440,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                     explicit
                 )
                 
+                lastActiveResponseText = finalSpeakable
                 _speakEvent.emit(finalSpeakable)
             } else {
                 _isSpeaking.value = false
