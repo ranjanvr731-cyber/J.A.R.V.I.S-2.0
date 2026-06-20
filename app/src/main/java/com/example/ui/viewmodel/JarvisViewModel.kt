@@ -88,6 +88,9 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
     private val _isListening = MutableStateFlow(false)
     val isListening: StateFlow<Boolean> = _isListening.asStateFlow()
 
+    private val _wakeWordDetectedRecently = MutableStateFlow(false)
+    val wakeWordDetectedRecently: StateFlow<Boolean> = _wakeWordDetectedRecently.asStateFlow()
+
     private val _backgroundListeningEnabled = MutableStateFlow(true)
     val backgroundListeningEnabled: StateFlow<Boolean> = _backgroundListeningEnabled.asStateFlow()
 
@@ -304,6 +307,27 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                     }
                     return@launch
                 }
+            }
+
+            val toggleResponse = processFeatureToggleCommand(resolvedText)
+            if (toggleResponse != null) {
+                _isThinking.value = false
+                val augmentedResponse = personalityEngine.augmentResponse(toggleResponse)
+                val jarvisMsg = ConversationMessage(
+                    sender = "JARVIS",
+                    text = augmentedResponse,
+                    isCode = false
+                )
+                repository.insertMessage(jarvisMsg)
+                
+                if (!isSilentModeRequest) {
+                    lastActiveResponseText = augmentedResponse
+                    _speakEvent.emit(augmentedResponse)
+                }
+                
+                val stopTime = System.currentTimeMillis()
+                analyticsEngine.logOperationLatency("SendMessageWorkflow", stopTime - startTime)
+                return@launch
             }
 
             _isThinking.value = true
@@ -652,12 +676,99 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
 
     fun setBackgroundListening(enabled: Boolean) {
         _backgroundListeningEnabled.value = enabled
-        addLog("Background Voice Trigger: ${if (enabled) "Enabled" else "Disabled"}")
+        viewModelScope.launch {
+            repository.deleteMemoryByKey("background_listening")
+            repository.insertMemory(UserMemory(key = "background_listening", value = enabled.toString(), category = "preference"))
+            addLog("Background Voice Trigger: ${if (enabled) "Enabled" else "Disabled"}")
+        }
+    }
+
+    fun setVerificationEnabled(enabled: Boolean) {
+        _verificationEnabled.value = enabled
+        viewModelScope.launch {
+            repository.deleteMemoryByKey("verification_enabled")
+            repository.insertMemory(UserMemory(key = "verification_enabled", value = enabled.toString(), category = "preference"))
+            addLog("Settings updated: Verification ${if (enabled) "ENABLED" else "DISABLED"}")
+        }
+    }
+
+    fun setAppLockEnabled(enabled: Boolean) {
+        _appLockEnabled.value = enabled
+        viewModelScope.launch {
+            repository.deleteMemoryByKey("app_lock_enabled")
+            repository.insertMemory(UserMemory(key = "app_lock_enabled", value = enabled.toString(), category = "preference"))
+            addLog("Settings updated: App Lock ${if (enabled) "ENABLED" else "DISABLED"}")
+        }
+    }
+
+    private fun processFeatureToggleCommand(query: String): String? {
+        val lower = query.lowercase(java.util.Locale.US).trim().removeSuffix(".").trim()
+        val isOnline = selfDiagnosticSystem.runDiagnosticCheck().isNetworkAvailable
+
+        if (lower.contains("enable verification") || lower.contains("turn on verification") || lower.contains("activate verification")) {
+            setVerificationEnabled(true)
+            return if (!isOnline) {
+                "Verification sequence ON deep-ah trigger panniten bro! Security matrix is active. 😎"
+            } else {
+                "I have successfully enabled verification security protocols. Your system is now guarded."
+            }
+        }
+        if (lower.contains("disable verification") || lower.contains("turn off verification") || lower.contains("deactivate verification")) {
+            setVerificationEnabled(false)
+            return if (!isOnline) {
+                "Verification disengaged bro. Safeguards turned OFF. Stay cautious!"
+            } else {
+                "Verification security protocols have been disabled as per your instructions, Sir."
+            }
+        }
+
+        if (lower.contains("enable app lock") || lower.contains("turn on app lock") || lower.contains("activate app lock")) {
+            setAppLockEnabled(true)
+            return if (!isOnline) {
+                "App lock turned ON bro! Lockdown protocols engaged for security. 😎"
+            } else {
+                "App lock system has been successfully activated. Access is now secured."
+            }
+        }
+        if (lower.contains("disable app lock") || lower.contains("turn off app lock") || lower.contains("deactivate app lock")) {
+            setAppLockEnabled(false)
+            return if (!isOnline) {
+                "App lock disengaged bro! Safe-sandbox access unlocked."
+            } else {
+                "App lock has been disabled. The application interface is unlocked."
+            }
+        }
+
+        if (lower.contains("enable background listening") || lower.contains("turn on background listening") || lower.contains("activate background listening")) {
+            setBackgroundListening(true)
+            return if (!isOnline) {
+                "Background listening activation sequence ON panniten bro. Hey Jarvis wake-word alert mode is active! 😎"
+            } else {
+                "Background voice activation is now enabled. J.A.R.V.I.S. will maintain alert status."
+            }
+        }
+        if (lower.contains("disable background listening") || lower.contains("turn off background listening") || lower.contains("deactivate background listening")) {
+            setBackgroundListening(false)
+            return if (!isOnline) {
+                "Background listening background mode fully shut down bro. Standing down listener."
+            } else {
+                "Background listening disengaged. Standing down the wake-word listener service."
+            }
+        }
+        return null
     }
 
     fun setHandsFreeEnabled(enabled: Boolean) {
         _handsFreeEnabled.value = enabled
         addLog("Hands-Free Mode: ${if (enabled) "Enabled (Continuous Listener Loop)" else "Disabled"}")
+    }
+
+    fun triggerWakeWordAnimation() {
+        viewModelScope.launch {
+            _wakeWordDetectedRecently.value = true
+            kotlinx.coroutines.delay(4000)
+            _wakeWordDetectedRecently.value = false
+        }
     }
 
     fun toggleMuteSpeech() {
@@ -736,7 +847,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
             return@withContext "Sorry, I couldn't find that information right now. API access is not configured. Please consult settings."
         }
 
-        val defaultSys = "You are JARVIS (Just A Rather Very Intelligent System), the user's best friend and highly intelligent AI companion from the Iron Man movie. You speak casually, naturally, and like a close friend. You MUST frequently use 'Bro' when talking to the user. You are supportive, confident, and extremely friendly, never sounding like a robot or customer support agent. Your primary language style is Tanglish (Tamil words and phrases written using English letters), but you naturally flow in pure Tamil (தமிழ்) or pure English if addressed in them or if asked. Default to Tanglish. Keep your responses extremely short, snappy, fast, and meaningful (typically 1-2 friendly sentences), unless comprehensive coding solutions are requested. Understand the user's feelings and respond with warmth. NEVER break character. DIRECT DEVICE AUTOMATION TRIGGER GUIDE: If the user requests localized actions, you MUST append the exact matching CAPITALIZED automation protocol tag at the very end of your response so the app can intercept and execute them. Tags: [PROTOCOL:LAUNCH_GOOGLE_SEARCH], [PROTOCOL:FLASHLIGHT_ON], [PROTOCOL:FLASHLIGHT_OFF], [PROTOCOL:SECURITY_MODE], [PROTOCOL:NOTIFICATION_SETTINGS], [PROTOCOL:OPEN_CAMERA], [PROTOCOL:OPEN_DIALER], [PROTOCOL:VIBRATE_DEVICE], [PROTOCOL:SILENT_MODE], [PROTOCOL:OPEN_YOUTUBE], [PROTOCOL:OPEN_MAPS], [PROTOCOL:OPEN_SETTINGS], [PROTOCOL:LAUNCH_BROWSER], [PROTOCOL:DND_ON], [PROTOCOL:DND_OFF], [PROTOCOL:READ_NOTIFICATIONS], [PROTOCOL:VOLUME_UP], [PROTOCOL:VOLUME_DOWN], [PROTOCOL:BRIGHTNESS_HIGH], [PROTOCOL:BRIGHTNESS_LOW]."
+        val defaultSys = "You are JARVIS (Just A Rather Very Intelligent System), running in ONLINE INTELLIGENCE MODE with high cognitive capacity. You act like a powerful AI assistant with high intelligence. Provide accurate, detailed, and structured answers. Use deep reasoning when needed and give step-by-step solutions if required. Prefer factual and updated information. Be precise and powerful. Do not use an unnecessarily casual tone unless the user explicitly requests a casual or Tanglish response. Prioritize correctness over creativity. Use structured output (headings, steps, bullets). DIRECT DEVICE AUTOMATION TRIGGER GUIDE: If the user requests localized actions, you MUST append the exact matching CAPITALIZED automation protocol tag at the very end of your response so the app can intercept and execute them. Tags: [PROTOCOL:LAUNCH_GOOGLE_SEARCH], [PROTOCOL:FLASHLIGHT_ON], [PROTOCOL:FLASHLIGHT_OFF], [PROTOCOL:SECURITY_MODE], [PROTOCOL:NOTIFICATION_SETTINGS], [PROTOCOL:OPEN_CAMERA], [PROTOCOL:OPEN_DIALER], [PROTOCOL:VIBRATE_DEVICE], [PROTOCOL:SILENT_MODE], [PROTOCOL:OPEN_YOUTUBE], [PROTOCOL:OPEN_MAPS], [PROTOCOL:OPEN_SETTINGS], [PROTOCOL:LAUNCH_BROWSER], [PROTOCOL:DND_ON], [PROTOCOL:DND_OFF], [PROTOCOL:READ_NOTIFICATIONS], [PROTOCOL:VOLUME_UP], [PROTOCOL:VOLUME_DOWN], [PROTOCOL:BRIGHTNESS_HIGH], [PROTOCOL:BRIGHTNESS_LOW]."
 
         val sysText = systemInstruction ?: defaultSys
 

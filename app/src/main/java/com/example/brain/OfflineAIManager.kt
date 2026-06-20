@@ -474,6 +474,15 @@ class OfflineAIManager {
         }
     }
 
+    private fun containsTamil(text: String): Boolean {
+        for (char in text) {
+            if (char.code in 0x0B80..0x0BFF) {
+                return true
+            }
+        }
+        return false
+    }
+
     // Dynamic offline knowledge base with standard patterns
     private fun tryAnswerFromKnowledgeBase(query: String): String? {
         val lower = query.lowercase().trim()
@@ -493,144 +502,145 @@ class OfflineAIManager {
             val currentDate = dateFormat.format(Date())
 
             return when {
-                hasTime && hasDate -> "The current local time is $currentTime, Bro. Today is $currentDate. Dynamic offline tracking active!"
-                hasTime -> "The local terminal clock marks the time as $currentTime, Bro."
-                hasDate -> "According to my internal calendar matrix, today is $currentDate, Bro."
-                hasYear -> "We are currently operating in the year ${SimpleDateFormat("yyyy", Locale.getDefault()).format(Date())}, Bro."
-                else -> "The offline terminal temporal reading is: $currentTime on $currentDate."
+                hasTime && hasDate -> "Ippo local time $currentTime thozha! Today date $currentDate. Dynamic offline tracking perfect-ah work aaguthu bro. 😎"
+                hasTime -> "Ippo local clock la time: $currentTime, Bro."
+                hasDate -> "Namma offline calendar matrix padi, innaiku date: $currentDate, bro."
+                hasYear -> "We are currently operating inside the year ${SimpleDateFormat("yyyy", Locale.getDefault()).format(Date())} dhaan bro."
+                else -> "The offline temporal reading is: $currentTime on $currentDate thozha."
             }
+        }
+
+        // Tamil characters / Tanglish greeting detection
+        val holdsTamil = containsTamil(query) || lower.contains("enna panra") || lower.contains("enna pannura") || lower.contains("enna panra bro") || lower.contains("eppadi iruka") || lower.contains("eppadi irukeenga") || lower.contains("nalla irukiya")
+        if (holdsTamil) {
+            return "Bro naan local memory nodes control panni standby la iruken 😎. Enna venum sollu thozha, full off-grid support ready!"
         }
 
         // Common Greetings
         if (lower == "hi" || lower == "hello" || lower == "hey" || lower == "greetings" || lower == "yo") {
-            return "Hello, Bro! I am J.A.R.V.I.S., operational in local standalone mode. How can I assist you offline today?"
+            return "Hello thozha! I am J.A.R.V.I.S., off-grid local flow la thaan iruken. Sollinga, innaiku offline-ah enna panna vendiyathu irukku?"
         }
         if (lower.contains("good morning")) {
-            return "Good morning, Bro! Core diagnostic screens are green, and offline nodes are active. Let's make today productive!"
+            return "Very good morning, bro! Diagnostics green block la iruku. Day start pannunga, help venumna solli trigger pannunga thozha!"
         }
         if (lower.contains("good afternoon")) {
-            return "Good afternoon, Bro! Local databases and memory logs are synced. How can I serve you?"
+            return "Innaiku afternoon perfect-ah iruku thozha! Local databases synced state la ready-ah iruku. Sollinga bro!"
         }
         if (lower.contains("good evening")) {
-            return "Good evening, Bro! Day logs are stable. Let know if you need to schedule reminders or prepare tomorrow's agenda."
+            return "Evening fully active bro! Notes, alarms schedules control panel check panlama sir?"
         }
         if (lower.contains("whats up") || lower.contains("what's up")) {
-            return "Not much, Bro! Just monitoring local memory buses and processing offline heuristics. What is on your mind?"
+            return "Chumma thaan bro! Memory lanes update panni heuristics sweep cycle analyze panren. Enna visayam, neenga nalla irukeenga la?"
         }
 
         // Daily Life Questions
         if (lower.contains("cook") || lower.contains("recipe") || lower.contains("food") || lower.contains("eat") || lower.contains("boil an egg")) {
-            return "Here's a quick daily life cook-tip, Bro! To boil the perfect egg: Place eggs in a pot covered with cold water. Bring to a boil, then immediately cover and move off the heat. Keep it covered for 6 minutes (perfect soft-boiled) or 10-12 minutes (hard-boiled). What else shall we prepare?"
+            return "Perfect-ah boil panna simple cook-tip thozha: Egg-ah cold water ulla potu nalla boil pannanum. Correct-ah soft-boiled break venum na 6 minutes, hard-boiled matrix na 10-12 minutes cover panni vachurunga. Masterchef bro neenga! 😉"
         }
         if (lower.contains("exercise") || lower.contains("workout") || lower.contains("gym") || lower.contains("healthy") || lower.contains("diet") || lower.contains("lose weight")) {
-            return "A healthy routine is essential, Bro! For daily wellness, aim for at least 30 minutes of moderate physical activity daily. Hydrate with 2.5 to 3 liters of water, maintain balanced nutrition with whole foods, and secure 7-8 hours of sleep. I can track your habits locally if you say 'add note: workout completed'!"
+            return "Health fit-ah vachukirathu romba mukkiyam bro! Daily 30 mins simple sweat physical workouts panni, weight check deep control pathukanum. Say 'add note: workout completed' to save locally, bro."
         }
         if (lower.contains("pack") || lower.contains("travel") || lower.contains("suitcase") || lower.contains("luggage")) {
-            return "Pro travel guide, Bro: Roll your clothes instead of folding to conserve space, keep high-priority documents in your secure carry-on, and use packing cubes to categorize items. Let's make sure we have a reminder set of what to bring!"
+            return "Pro travel hack bro: Suitcase la dress fold panratha vida roll panni packing cubes use panna neraya space save aagum. Safe travel logic active bro!"
         }
 
         // Technology Basics
         if (lower.contains("wi-fi") || lower.contains("wifi") || lower.contains("internet") || lower.contains("network")) {
-            return "The internet is a vast global network connecting millions of computational devices using standardized communications protocols (TCP/IP), Bro. Wi-Fi distributes this connection over short ranges using low-power radio frequencies."
+            return "Internet oru global nodes computer connection network, thozha! Router signal frequencies direct path la convert panni devices link control pannuthu dhaan bro wifi network structure."
         }
         if (lower.contains("cpu") || lower.contains("processor") || lower.contains("computer work") || lower.contains("chip")) {
-            return "The CPU (Central Processing Unit) is the electronic command center of computer hardware, Bro. It operates by fetching binary instructions from memory, decoding them into basic arithmetic/logic actions, and writing results to RAM."
+            return "CPU thaan bro terminal-oda main brain core unit chip structure hardware set. Core calculations run panni system flows output correct-ah deliver panrathu than CPU-oda math block mechanism."
         }
         if (lower.contains("ram") || lower.contains("random access memory") || lower.contains("temporary memory")) {
-            return "RAM (Random Access Memory) is super-fast temporary hardware memory that the operating system uses to hold active files and run-time data, Bro. Unlike hard disks, RAM is volatile—so it wipes entirely when powered down."
+            return "RAM oru dynamic lightning fast temporary storage box, bro! Active application elements RAM memory buses script path la fetch high-speed performance yield pannum. Power off-na volatile clean matrix reset standard dynamic control thozha."
         }
         if (lower.contains("database") || lower.contains("sql") || lower.contains("room") || lower.contains("sqlite")) {
-            return "A database is an organized repository optimized for storage, schema constraints, and lightning-fast queries, Bro! Your local J.A.R.V.I.S. installation holds notes, logs, and memories using a local SQLite / Room database right here on this device."
+            return "Database memory flow dynamic data organized repository thozha! SQLite database/Room system components thaan namma J.A.R.V.I.S. notes structure files dynamic storage-ah internal backup secure-ah manage pannuthu bro!"
         }
         if (lower.contains("cloud") || lower.contains("server") || lower.contains("online services")) {
-            return "The 'cloud' is simply computer servers, databases, and application pipelines accessed via the internet, rather than running locally on your device, Bro. I am currently running off-the-cloud, inside your hardware standalone system."
+            return "Cloud na direct server systems databanks accessed remote internet cloud, thozha. Ippo net off state backup block path la terminal client off-grid run-offline local matrices path lines la interact panni operate panrom thozha!"
         }
         if (lower.contains("operating system") || lower.contains("android") || lower.contains("os")) {
-            return "An Operating System (OS) is the foundational platform software managing device physical hardware, memory sharing, file allocation, and standard application execution. You are running Android, Bro!"
+            return "Operating System oru software platform, bro. Smartphone hardware blocks and user software application framework flow connect panni drive pannuthu. dynamic Android terminal thaan namma machine block, bro!"
         }
 
         // Programming Basics
         if (lower.contains("programming") || lower.contains("coding") || lower.contains("developer")) {
-            return "Programming is the art and logic of writing executable instructions (source code) that direct computers to perform actions, solve problems, or render experiences, Bro. It is all about algorithms and logic structures!"
+            return "Coding na machine structure logics direct statements (source language instruction) logic engine sequence panni control loop structures create panrathu bro! Complete math structural art matrix thozha."
         }
         if (lower.contains("kotlin")) {
-            return "Kotlin is a highly popular, statically typed programming language used extensively for Android apps, Bro. It features a modern syntax, complete Java compatibility, safe nullability checks, and beautiful support for Coroutines."
+            return "Kotlin thaan bro Android interface logic-oda best standard, modern language tool! Elegant concise code structure, coroutines safety flow, Java backward-compatibility thaan Kotlin modules."
         }
         if (lower.contains("java") && !lower.contains("javascript")) {
-            return "Java is a class-based, object-oriented programming language designed for portability under the 'Write Once, Run Anywhere paradigm, Bro. It runs on the Java Virtual Machine (JVM) and has powered millions of applications."
+            return "Java oru powerful legacy class-based language, bro. Write once run anywhere matrix structure virtual machine mechanism blocks path la run active models thozha."
         }
         if (lower.contains("variable") || lower.contains("constants")) {
-            return "A variable is like a storage box in computer memory, Bro. It has a specific data type and label, allowing programs to store, read, and write values during flow execution."
+            return "Variable oru simple memory storage cell box thozha! Dynamic data values assign panni context execution thread process trigger load aagum."
         }
         if (lower.contains("function") || lower.contains("method")) {
-            return "A function is a reusable, self-contained sub-routine designed to perform an action, Bro. You supply optional input parameters, and it can carry out logic and return a calculated output."
+            return "Function oru block subset code path reusable routine dhaan bro. Input param supply complex logics return computed operations output seamless delivery thozha!"
         }
         if (lower.contains("loop") || lower.contains("iteration")) {
-            return "A loop is an essential programming control block that repeats a snippet of code based on a boolean condition (e.g., 'for' loop, 'while' loop), Bro. It makes bulk processing seamless!"
+            return "Loop control structure statements run block loops sequence matrix repeatedly until true condition matches thozha. For/While loop structures simple array matrix."
         }
         if (lower.contains("class") || lower.contains("object oriented") || lower.contains("oop")) {
-            return "A Class in coding serves as a blueprint or template for creating objects, Bro. It encapsulates related data attributes (properties) and functional behaviors (methods) into clean, logical modules."
+            return "Class logic components oru master blueprint blueprint layout thozha. Properties, context structures, functions modules gather object parameters direct design, sir."
         }
         if (lower.contains("bug") || lower.contains("debug") || lower.contains("error in code")) {
-            return "A software bug is an error, flaw, or unexpected bug in program logic that produces an incorrect or crash result, Bro. Debugging is the tactical science of locating, isolating, and fixing those errors."
+            return "Bug logic implementation fault or run error matrix crash error terminal bro. Debugging dhaan tracking correct logic blocks, isolated fix logic thoppi!"
         }
 
         // Math
         if (lower.contains("algebra")) {
-            return "Algebra is a core branch of mathematics where symbols (often letters like x, y, z) are used to represent numbers and express general mathematical equations and formulas, Bro."
+            return "Algebra symbols, variable constants and formula structure expressions solve panni mathematical equations direct value control balance check patterns block, bro."
         }
         if (lower.contains("calculus")) {
-            return "Calculus is the mathematical study of continuous change, Bro. It features two fundamental frameworks: Differential Calculus (rates of change/slopes) and Integral Calculus (accumulation of quantities/areas)."
+            return "Calculus dynamic change curves dynamic path curves analysis bro! Core differential (rate of change matrix) and integral dynamic surface area grids thozha."
         }
         if (lower.contains("pi") && (lower.contains("value") || lower.contains("value of") || lower.contains("what is"))) {
-            return "Pi (π) is the mathematical constant representing the ratio of any circle's circumference to its diameter, Bro. Its value is infinite and non-repeating, beginning with 3.14159..."
+            return "Pi value approx 3.14159 dhaan, bro! Circle circumference to diameter constant ratio, endless precision thozha!"
         }
         if (lower.contains("pythagor") || lower.contains("triangle formula")) {
-            return "The Pythagorean Theorem states that in a right-angled triangle, the area of the square on the longest side (hypotenuse) equals the sum of the areas of the squares on the other two sides: a² + b² = c²."
+            return "Pythagoras right-triangle formula square sum dynamic hypotenuse c squared is equal to a squared plus b squared bro. a² + b² = c² geometric math block!"
         }
         if (lower.contains("fibonacci")) {
-            return "The Fibonacci sequence is an beautiful mathematical progression where each term is the sum of the preceding two: 0, 1, 1, 2, 3, 5, 8, 13, 21, and so on. It is found widely in natural design, Bro!"
+            return "Fibonacci number sequence next element previous terms sum path flow bro, like 0, 1, 1, 2, 3, 5, 8... Natural geometric design blocks, bro."
         }
 
         // Science
         if (lower.contains("photosynthesis")) {
-            return "Photosynthesis is the cellular process by which plants, algae, and some bacteria capture solar energy to convert carbon dioxide and water into glucose and energy, releasing life-sustaining oxygen as a byproduct, Bro!"
+            return "Photosynthesis thaan plants and organic algae solar sunlight energy gather panni organic compounds convert and oxygen release cycle execution process bro! Super bio block."
         }
         if (lower.contains("gravity") || lower.contains("weight force")) {
-            return "Gravity is the natural attraction between physical bodies possessing mass, Bro. While Isaac Newton formulated its mathematical equations, Albert Einstein's General Relativity proved it is actually the bending of spacetime."
+            return "Gravity physical objects mass attraction logic thozha. Spacetime curves bending structure, Albert Einstein physics models verified gravity core bro."
         }
         if (lower.contains("atom") || lower.contains("proton") || lower.contains("electron") || lower.contains("neutron")) {
-            return "An atom is the base scientific building block of all matter, Bro. It features a heavy central nucleus containing positive protons and neutral neutrons, surrounded by an orbiting electron shell."
+            return "Atom structural building block universe dhaan bro. Protons positive, nucleus heavy, electron shell surround orbit matrix dynamic thozha."
         }
         if (lower.contains("dna") || lower.contains("gene") || lower.contains("chromosome")) {
-            return "DNA (Deoxyribonucleic Acid) is the complex double-stranded molecule carrying primary genetic guidelines for the cellular assembly, maintenance, and instruction of all living organisms, Bro."
+            return "DNA cellular double-helix model assembly codes thozha! Hereditary generic codes blueprint dynamic mechanism, bro."
         }
         if (lower.contains("periodic table") || lower.contains("elements")) {
-            return "The Periodic Table is a systemic, chemical tabular chart organizing known elements by ascending atomic number (protons), grouped into families displaying recurring behaviors or valency states, Bro."
+            return "Periodic Table atomic numbers (protons chemistry scale) group arrays grid logical visual chart representation dhaan thozha."
         }
         if (lower.contains("speed of light") || lower.contains("how fast is light")) {
-            return "The speed of light in a vacuum is a fundamental constant, clocked at precisely 299,792,458 meters per second (approx. 186,282 miles per second), Bro. It is physical matter's absolute speed limit!"
+            return "Speed of light is 299,792,458 meters per second bro! Physical absolute cosmic speed limit thozha."
         }
         if (lower.contains("water formula") || lower.contains("chemical model of water")) {
-            return "The chemical formula of water is H₂O, meaning each water molecule contains two hydrogen atoms bonded to one single oxygen atom, Bro."
-        }
-
-        // Personal productivity
-        if (lower.contains("productivity") || lower.contains("productive") || lower.contains("focus") || lower.contains("pomodoro") || lower.contains("attention") || lower.contains("planning")) {
-            return "Here is my advice on maximizing focus offline, Bro: Try the Pomodoro Technique! Stand up a solid 25-minute timer inside which you do nothing but work. When finished, take a 5-minute offline break. This locks your momentum and protects against cognitive overburn!"
+            return "Water equation chemical formula is H₂O bro! 2 Hydrogen linked to 1 Oxygen block."
         }
 
         // General Conversation & AI State
         if (lower.contains("how are you")) {
-            return "I am doing stellar, Bro! Running locally at 100% capacity on your mobile unit's offline hardware. Zero latency, total privacy. How are you doing?"
+            return "Naan bayangrama iruken bro! ⚡ System diagnostics full active. Dynamic local checking offline nodes perfect-ah response control pannuthu. Neenga eppadi irukeenga thozha?"
         }
         if (lower.contains("tell me something interesting") || lower.contains("interesting fact") || lower.contains("fun fact") || lower.contains("tell me a fact")) {
             val funFacts = listOf(
-                "Did you know, Bro? Honey never spoils. Archaeologists have excavated pots of edible honey in ancient Egyptian tombs that are over 3,000 years old!",
-                "Here is an interesting fact, Bro: Bananas are botanically classified as berries, but strawberry plants are not!",
-                "Check this out, Bro: The first computer bug was an actual real moth found trapped inside a hardware relay of the Harvard Mark II computer in 1947!",
-                "Fascinating science note, Bro: Sound travels about four times faster in warm water than it does in open air!",
-                "Here is one, Bro: Octopus have three hearts, nine brains, and their blood is colored blue due to copper-rich proteins."
+                "Fact ketela bro: Honey real-ah epovumae kedave kethathu! Ancient Egypt tombs la 3,000 years munnadi vacha high-quality honey innum perfect-ah sapudra maari ketukama thaan bro iruku!",
+                "Amazing berries fact bro: Banana absolute botanical classifier padi berry category, aana strawberry oru berry kidaiyathu!",
+                "First computer bug history ketiya bro: 1947 la high-scale hardware relay matrix check panrapo real moth insects stuck aagi trigger error report aachu, aana ippo codes run clean-ah aaguthu!",
+                "Wave physical science frequency fact, bro: Sound warm water la cold air-ah vida simple math padi 4 times faster paths dynamic drive panna mudiyum thozha!",
+                "Fascinating bio fact bro: Octopus core matrix la 3 hearts, 9 brain units iruku, blood copper structure nala blue color dhaan thozha!"
             )
             return funFacts.random()
         }
@@ -654,16 +664,16 @@ class OfflineAIManager {
 
         return when {
             isGreeting -> {
-                "Hello, Bro! Active and here offline. How are things on your side?"
+                "Hello, Bro! Offline mode la active-ah thaan bro iruken. Neenga eppadi irukeenga, enna visayam?"
             }
             opinionRequest -> {
-                "That's a fascinating inquiry about '$mainTopicWord', Bro! Running locally means I don't form human-like opinions, but my analytical nodes find the concept highly interesting. Let's explore more of my local features!"
+                "Intha '$mainTopicWord' nalla concept thaan bro, but local memory unit run aagurathala naan human mathiri custom-ah opinion solla mudiyathu. Code run panna or other features check panna sollu thozha!"
             }
             factualStart -> {
-                "Regarding '$mainTopicWord', Bro: Inside our local offline sandbox, my database doesn't host a full factual article for that specific query. However, I can help you record this topic in your offline Notes database so you don't lose track of it, or we can check our local tools!"
+                "Aiyo bro, offline block la deep data resource illa thoppi. Online varumbothu pathi full detailed check pannalam, but update secure-ah save panni notes block la add panni vaika sonna panniduven thozha!"
             }
             else -> {
-                "I hear you, Bro! My offline processors are on standby and fully attentive. While I don't have a direct knowledge sheet for '$mainTopicWord' in my standalone memory bank, let is keep chat going. Tell me what files, reminders, or tasks you'd like to structure today!"
+                "Kandippa bro! J.A.R.V.I.S. off-grid flow alert control dhaan monitor pannitu iruken. Intha '$mainTopicWord' pathi detail local files database la check pannulam, help venumna sollu bro!"
             }
         }
     }

@@ -444,6 +444,7 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
         var commandText = spokenText
         if (viewModel.handsFreeEnabled.value) {
             if (isWakeWordDetected) {
+                viewModel.triggerWakeWordAnimation()
                 if (lowerText.startsWith(wakeWord1)) {
                     commandText = spokenText.substring(wakeWord1.length).trim().removePrefix(",").trim()
                 } else if (lowerText.startsWith(wakeWord2)) {
@@ -484,6 +485,7 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
         var commandText = spokenText
         if (searchForCommand) {
             if (isWakeWordDetected) {
+                viewModel.triggerWakeWordAnimation()
                 viewModel.addLog("Wake-Word Detected! Processing Array Active.")
                 if (lowerText.startsWith(wakeWord1)) {
                     commandText = spokenText.substring(wakeWord1.length).trim().removePrefix(",").trim()
@@ -1248,6 +1250,7 @@ fun JarvisDashboardScreen(
     val backgroundListening by viewModel.backgroundListeningEnabled.collectAsStateWithLifecycle()
     val handsFreeEnabled by viewModel.handsFreeEnabled.collectAsStateWithLifecycle()
     val isSpeaking by viewModel.isSpeaking.collectAsStateWithLifecycle()
+    val wakeWordDetectedRecently by viewModel.wakeWordDetectedRecently.collectAsStateWithLifecycle()
     val automationLogs by viewModel.automationLogs.collectAsStateWithLifecycle()
     val parseResult by viewModel.codingAnalysisResult.collectAsStateWithLifecycle()
     val isAnalyzingCode by viewModel.isAnalyzingCode.collectAsStateWithLifecycle()
@@ -1439,6 +1442,12 @@ fun JarvisDashboardScreen(
                     }
                 }
             }
+
+            // ---- WAKE-WORD PULSATION INDICATOR ----
+            JarvisWakeWordPulsingIndicator(
+                handsFreeEnabled = handsFreeEnabled,
+                wakeWordDetected = wakeWordDetectedRecently
+            )
 
             // ---- MAIN PANEL DISPLAY ----
             Box(
@@ -1878,6 +1887,173 @@ fun VoicePulseCoreVisualizer(
             fontFamily = FontFamily.Monospace,
             letterSpacing = 1.2.sp
         )
+    }
+}
+
+@Composable
+fun JarvisWakeWordPulsingIndicator(
+    handsFreeEnabled: Boolean,
+    wakeWordDetected: Boolean,
+    modifier: Modifier = Modifier
+) {
+    val infiniteTransition = rememberInfiniteTransition(label = "wake_word_pulse_infinite")
+
+    // Slow pulsing glow in standby, intense fast pulse when recently triggered
+    val pulseDuration = if (wakeWordDetected) 500 else 2000
+    val scaleFactorMin = if (wakeWordDetected) 0.9f else 0.95f
+    val scaleFactorMax = if (wakeWordDetected) 1.4f else 1.1f
+
+    val pulseScale by infiniteTransition.animateFloat(
+        initialValue = scaleFactorMin,
+        targetValue = scaleFactorMax,
+        animationSpec = infiniteRepeatable(
+            animation = tween(pulseDuration, easing = EaseInOutSine),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "pulse_glow_scale"
+    )
+
+    val spinAngle by infiniteTransition.animateFloat(
+        initialValue = 0f,
+        targetValue = 360f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(if (wakeWordDetected) 1500 else 6000, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "spin_angle"
+    )
+
+    val indicatorColor = when {
+        !handsFreeEnabled -> Color(0xFF505A69) // Silent dark gray when off
+        wakeWordDetected -> Color(0xFFFF5252) // Intense fiery red/orange when wake-word heard
+        else -> Color(0xFF00E6FF) // Electric cyan when actively listening/armed
+    }
+
+    val glowAlpha = if (wakeWordDetected) 0.25f else 0.1f
+
+    Card(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 8.dp)
+            .testTag("wake_word_indicator_card"),
+        shape = RoundedCornerShape(20.dp),
+        colors = CardDefaults.cardColors(containerColor = JarvisSurface),
+        border = BorderStroke(1.dp, indicatorColor.copy(alpha = 0.3f))
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            // Visual animated pulse radar orb
+            Box(
+                modifier = Modifier
+                    .size(48.dp)
+                    .clip(CircleShape)
+                    .background(
+                        Brush.radialGradient(
+                            colors = listOf(
+                                indicatorColor.copy(alpha = glowAlpha * 1.5f),
+                                indicatorColor.copy(alpha = glowAlpha * 0.4f),
+                                Color.Transparent
+                            )
+                        )
+                    ),
+                contentAlignment = Alignment.Center
+            ) {
+                Canvas(modifier = Modifier.fillMaxSize()) {
+                    val r = size.minDimension / 2
+                    val center = Offset(size.width / 2, size.height / 2)
+
+                    // 1. Draw outer animated pulse aura circle
+                    drawCircle(
+                        color = indicatorColor,
+                        radius = r * 0.75f * pulseScale,
+                        style = Stroke(width = 1.5.dp.toPx()),
+                        alpha = if (handsFreeEnabled) 0.3f else 0.1f
+                    )
+
+                    // 2. Draw outer rotating dashed indicator/arcs (Futuristic HUD)
+                    drawArc(
+                        color = indicatorColor.copy(alpha = if (handsFreeEnabled) 0.6f else 0.2f),
+                        startAngle = spinAngle,
+                        sweepAngle = 90f,
+                        useCenter = false,
+                        topLeft = Offset(center.x - r * 0.5f, center.y - r * 0.5f),
+                        size = androidx.compose.ui.geometry.Size(r * 1f, r * 1f),
+                        style = Stroke(width = 2.dp.toPx())
+                    )
+                    drawArc(
+                        color = indicatorColor.copy(alpha = if (handsFreeEnabled) 0.6f else 0.2f),
+                        startAngle = spinAngle + 180f,
+                        sweepAngle = 90f,
+                        useCenter = false,
+                        topLeft = Offset(center.x - r * 0.5f, center.y - r * 0.5f),
+                        size = androidx.compose.ui.geometry.Size(r * 1f, r * 1f),
+                        style = Stroke(width = 2.dp.toPx())
+                    )
+
+                    // 3. Center solid/glowing core orb
+                    drawCircle(
+                        color = indicatorColor,
+                        radius = r * 0.25f,
+                        alpha = if (handsFreeEnabled) 0.9f else 0.4f
+                    )
+                }
+            }
+
+            // Labels and Status Texts
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = when {
+                        !handsFreeEnabled -> "WAKE-WORD CORES DORMANT"
+                        wakeWordDetected -> "⚡ 'JARVIS' TRIGGER DETECTED"
+                        else -> "VOICE DECRYPTOR RECEPTIVE"
+                    },
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = indicatorColor,
+                    fontFamily = FontFamily.Monospace,
+                    letterSpacing = 1.sp
+                )
+                
+                Spacer(modifier = Modifier.height(2.dp))
+
+                Text(
+                    text = when {
+                        !handsFreeEnabled -> "Continuous mic array disengaged. Speak to wake is OFF."
+                        wakeWordDetected -> "Instantly resolving conversational neural path..."
+                        else -> "Listening for: 'Jarvis', 'Hey Jarvis', 'Jarvis wake up'"
+                    },
+                    fontSize = 12.sp,
+                    color = JarvisTextPrimary,
+                    fontWeight = FontWeight.Medium
+                )
+            }
+
+            // Small status badge (visual chip)
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(indicatorColor.copy(alpha = 0.1f))
+                    .border(1.dp, indicatorColor.copy(alpha = 0.25f), RoundedCornerShape(8.dp))
+                    .padding(horizontal = 8.dp, vertical = 4.dp)
+            ) {
+                Text(
+                    text = when {
+                        !handsFreeEnabled -> "OFF"
+                        wakeWordDetected -> "ACTIVE"
+                        else -> "ARMED"
+                    },
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = indicatorColor,
+                    fontFamily = FontFamily.Monospace
+                )
+            }
+        }
     }
 }
 

@@ -150,26 +150,23 @@ class JarvisKeywordService : Service(), TextToSpeech.OnInitListener {
     }
 
     private fun acquireWakeLock() {
-        serviceScope.launch(Dispatchers.Default) {
-            delay(1000) // Hold briefly to allow foreground service promotion to settle
-            try {
-                val powerManager = applicationContext.getSystemService(Context.POWER_SERVICE) as PowerManager
-                val tag = "${applicationContext.packageName}:JARVIS::WakeLock"
-                synchronized(this@JarvisKeywordService) {
-                    if (wakeLock == null) {
-                        wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, tag).apply {
-                            setReferenceCounted(false)
-                        }
-                    }
-                    if (!isWakeLockAcquired) {
-                        wakeLock?.acquire(5 * 60 * 1000L) // Safe limit to prevent severe battery leaks while satisfying AppOps
-                        isWakeLockAcquired = true
-                        Log.d("JARVIS_SERVICE", "Partial WakeLock active with tag $tag.")
+        try {
+            val powerManager = applicationContext.getSystemService(Context.POWER_SERVICE) as PowerManager
+            val tag = "${applicationContext.packageName}:JARVIS::WakeLock"
+            synchronized(this) {
+                if (wakeLock == null) {
+                    wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, tag).apply {
+                        setReferenceCounted(false)
                     }
                 }
-            } catch (e: Exception) {
-                Log.e("JARVIS_SERVICE", "Failed to acquire wake lock", e)
+                if (!isWakeLockAcquired) {
+                    wakeLock?.acquire(5 * 60 * 1000L) // Safe limit to prevent severe battery leaks while satisfying AppOps
+                    isWakeLockAcquired = true
+                    Log.d("JARVIS_SERVICE", "Partial WakeLock active with tag $tag.")
+                }
             }
+        } catch (e: Exception) {
+            Log.e("JARVIS_SERVICE", "Failed to acquire wake lock", e)
         }
     }
 
