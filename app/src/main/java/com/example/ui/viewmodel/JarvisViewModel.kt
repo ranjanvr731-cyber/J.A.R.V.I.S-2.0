@@ -763,6 +763,10 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         addLog("Hands-Free Mode: ${if (enabled) "Enabled (Continuous Listener Loop)" else "Disabled"}")
     }
 
+    fun setListening(listening: Boolean) {
+        _isListening.value = listening
+    }
+
     fun triggerWakeWordAnimation() {
         viewModelScope.launch {
             _wakeWordDetectedRecently.value = true

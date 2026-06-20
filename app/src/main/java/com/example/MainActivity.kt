@@ -305,11 +305,13 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
                         setRecognitionListener(object : android.speech.RecognitionListener {
                             override fun onReadyForSpeech(params: Bundle?) {
                                 Log.d("JARVIS", "SpeechRecognizer Ready")
+                                viewModel.setListening(true)
                                 viewModel.addLog("Listening Core: Dynamic Wake-Word Array ACTIVE")
                             }
 
                             override fun onBeginningOfSpeech() {
                                 Log.d("JARVIS", "SpeechRecognizer Beginning of speech")
+                                viewModel.setListening(true)
                                 // User began talking - instantly terminate active speech synthetic registers
                                 if (tts?.isSpeaking == true) {
                                     tts?.stop()
@@ -324,10 +326,12 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
 
                             override fun onEndOfSpeech() {
                                 Log.d("JARVIS", "SpeechRecognizer End of speech")
+                                viewModel.setListening(false)
                             }
 
                             override fun onError(error: Int) {
                                 isSpeechRecognizerActive = false
+                                viewModel.setListening(false)
                                 val message = when (error) {
                                     android.speech.SpeechRecognizer.ERROR_AUDIO -> "Audio recording error"
                                     android.speech.SpeechRecognizer.ERROR_CLIENT -> "Client side error"
@@ -360,6 +364,7 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
 
                             override fun onResults(results: Bundle?) {
                                 isSpeechRecognizerActive = false
+                                viewModel.setListening(false)
                                 val matches = results?.getStringArrayList(android.speech.SpeechRecognizer.RESULTS_RECOGNITION)
                                 val spokenText = matches?.firstOrNull() ?: ""
                                 if (spokenText.isNotBlank()) {
@@ -750,6 +755,7 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
     fun stopListening() {
         runOnUiThread {
             try {
+                viewModel.setListening(false)
                 if (isSpeechRecognizerActive) {
                     speechRecognizer?.stopListening()
                     speechRecognizer?.cancel()
@@ -784,6 +790,7 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
                 putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
             }
             try {
+                viewModel.setListening(true)
                 if (isSpeechRecognizerActive) {
                     speechRecognizer?.cancel()
                     isSpeechRecognizerActive = false
@@ -1251,6 +1258,7 @@ fun JarvisDashboardScreen(
     val handsFreeEnabled by viewModel.handsFreeEnabled.collectAsStateWithLifecycle()
     val isSpeaking by viewModel.isSpeaking.collectAsStateWithLifecycle()
     val wakeWordDetectedRecently by viewModel.wakeWordDetectedRecently.collectAsStateWithLifecycle()
+    val isListening by viewModel.isListening.collectAsStateWithLifecycle()
     val automationLogs by viewModel.automationLogs.collectAsStateWithLifecycle()
     val parseResult by viewModel.codingAnalysisResult.collectAsStateWithLifecycle()
     val isAnalyzingCode by viewModel.isAnalyzingCode.collectAsStateWithLifecycle()
@@ -1461,6 +1469,7 @@ fun JarvisDashboardScreen(
                         scrollState = scrollState,
                         isThinking = isThinking,
                         isSpeaking = isSpeaking,
+                        isListening = isListening,
                         backgroundListening = backgroundListening,
                         handsFreeEnabled = handsFreeEnabled,
                         onMessageSent = { msg ->
@@ -1520,6 +1529,7 @@ fun ChatConsoleTab(
     scrollState: androidx.compose.foundation.lazy.LazyListState,
     isThinking: Boolean,
     isSpeaking: Boolean,
+    isListening: Boolean,
     backgroundListening: Boolean,
     handsFreeEnabled: Boolean,
     onMessageSent: (String) -> Unit,
@@ -1743,8 +1753,10 @@ fun ChatConsoleTab(
             VoicePulseCoreVisualizer(
                 isThinking = isThinking,
                 isSpeaking = isSpeaking,
+                isListening = isListening,
                 handsFreeEnabled = handsFreeEnabled,
-                onStartSpeech = onStartSpeech
+                onStartSpeech = onStartSpeech,
+                onToggleHandsFree = onToggleHandsFree
             )
         }
     }
@@ -1755,10 +1767,12 @@ fun ChatConsoleTab(
 fun VoicePulseCoreVisualizer(
     isThinking: Boolean,
     isSpeaking: Boolean,
+    isListening: Boolean,
     handsFreeEnabled: Boolean,
-    onStartSpeech: () -> Unit
+    onStartSpeech: () -> Unit,
+    onToggleHandsFree: () -> Unit
 ) {
-    val infiniteTransition = rememberInfiniteTransition(label = "pulse")
+    val infiniteTransition = rememberInfiniteTransition(label = "pulse_equalizer")
     
     // Rotating arc degrees animation
     val rotationAngle by infiniteTransition.animateFloat(
@@ -1773,10 +1787,10 @@ fun VoicePulseCoreVisualizer(
 
     // Pulsing outer glow radius animation
     val pulseScale by infiniteTransition.animateFloat(
-        initialValue = 0.8f,
-        targetValue = 1.3f,
+        initialValue = 0.82f,
+        targetValue = 1.25f,
         animationSpec = infiniteRepeatable(
-            animation = tween(if (isThinking) 600 else if (isSpeaking) 900 else 1800, easing = EaseInOutSine),
+            animation = tween(if (isThinking) 500 else if (isSpeaking) 800 else if (isListening) 1000 else 1800, easing = EaseInOutSine),
             repeatMode = RepeatMode.Reverse
         ),
         label = "pulse_scale"
@@ -1785,108 +1799,343 @@ fun VoicePulseCoreVisualizer(
     val coreColor = when {
         isThinking -> JarvisPrimary
         isSpeaking -> JarvisSuccess
-        handsFreeEnabled -> Color(0xFF80DEEA) // Glowing cyan for active listening
+        isListening -> Color(0xFF00E6FF) // Electric cyan
+        handsFreeEnabled -> Color(0xFF80DEEA) // Glowing cyan
         else -> JarvisSecondary
     }
 
-    Column(
-        horizontalAlignment = Alignment.CenterHorizontally,
-        modifier = Modifier.padding(vertical = 16.dp)
+    // Prepare animated values for 8 soundwave equalizer bars
+    val barAnimations = (0..7).map { index ->
+        val delayTime = index * 120
+        val baseDuration = when {
+            isThinking -> 350 + (index * 40)
+            isSpeaking -> 450 + (index * 60)
+            isListening -> 500 + (index * 50)
+            handsFreeEnabled -> 1200 + (index * 100)
+            else -> 2000
+        }
+        
+        infiniteTransition.animateFloat(
+            initialValue = 0.1f,
+            targetValue = when {
+                isThinking -> 0.4f + (index % 3) * 0.15f
+                isSpeaking -> 0.95f - (index % 2) * 0.25f
+                isListening -> 0.85f - (index % 2) * 0.2f
+                handsFreeEnabled -> 0.25f
+                else -> 0.05f // virtually flat when mic off
+            },
+            animationSpec = infiniteRepeatable(
+                animation = tween(
+                    durationMillis = baseDuration,
+                    delayMillis = delayTime,
+                    easing = EaseInOutSine
+                ),
+                repeatMode = RepeatMode.Reverse
+            ),
+            label = "bar_anim_$index"
+        )
+    }
+
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("voice_console_panel"),
+        shape = RoundedCornerShape(24.dp),
+        colors = CardDefaults.cardColors(containerColor = JarvisSurface.copy(alpha = 0.7f)),
+        border = BorderStroke(1.dp, coreColor.copy(alpha = 0.25f))
     ) {
-        Box(
+        Column(
             modifier = Modifier
-                .size(110.dp)
-                .clip(CircleShape)
-                .background(
-                    Brush.radialGradient(
-                        colors = listOf(
-                            coreColor.copy(alpha = 0.15f),
-                            coreColor.copy(alpha = 0.03f),
-                            Color.Transparent
-                        )
-                    )
-                )
-                .testTag("vocal_core_button"),
-            contentAlignment = Alignment.Center
+                .fillMaxWidth()
+                .padding(18.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            Canvas(modifier = Modifier.fillMaxSize()) {
-                val r = size.minDimension / 2
-                val center = Offset(size.width / 2, size.height / 2)
+            
+            // CONSOLE HEADER LINE
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 16.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Box(
+                        modifier = Modifier
+                            .size(8.dp)
+                            .clip(CircleShape)
+                            .background(
+                                if (isListening) Color(0xFF00E6FF)
+                                else if (isSpeaking) JarvisSuccess
+                                else if (isThinking) JarvisPrimary
+                                else if (handsFreeEnabled) Color(0xFF80DEEA)
+                                else Color(0xFF505A69)
+                            )
+                    )
+                    Text(
+                        text = "VOICE RECEPTIVITY MODULE",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = JarvisTextPrimary,
+                        fontFamily = FontFamily.Monospace,
+                        letterSpacing = 1.sp
+                    )
+                }
 
-                // 1. Outer radiating pulse wave
-                drawCircle(
-                    color = coreColor,
-                    radius = r * 0.75f * pulseScale,
-                    style = Stroke(width = 1.5.dp.toPx()),
-                    alpha = 0.15f
-                )
-
-                // 2. Spinning outer technical ring with gaps (Ark Reactor style)
-                drawArc(
-                    color = coreColor.copy(alpha = 0.4f),
-                    startAngle = rotationAngle,
-                    sweepAngle = 70f,
-                    useCenter = false,
-                    topLeft = Offset(center.x - r * 0.70f, center.y - r * 0.70f),
-                    size = androidx.compose.ui.geometry.Size(r * 1.4f, r * 1.4f),
-                    style = Stroke(width = 2.dp.toPx())
-                )
-                
-                drawArc(
-                    color = coreColor.copy(alpha = 0.4f),
-                    startAngle = rotationAngle + 180f,
-                    sweepAngle = 70f,
-                    useCenter = false,
-                    topLeft = Offset(center.x - r * 0.70f, center.y - r * 0.70f),
-                    size = androidx.compose.ui.geometry.Size(r * 1.4f, r * 1.4f),
-                    style = Stroke(width = 2.dp.toPx())
-                )
-
-                // 3. Inner technical guiding ring
-                drawCircle(
-                    color = coreColor.copy(alpha = 0.12f),
-                    radius = r * 0.55f,
-                    style = Stroke(width = 1.dp.toPx())
-                )
+                // Small modern state chip
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(coreColor.copy(alpha = 0.12f))
+                        .border(1.dp, coreColor.copy(alpha = 0.3f), RoundedCornerShape(6.dp))
+                        .padding(horizontal = 8.dp, vertical = 2.dp)
+                ) {
+                    Text(
+                        text = when {
+                            isThinking -> "ROUTING"
+                            isSpeaking -> "FEEDBACK"
+                            isListening -> "LISTENING"
+                            handsFreeEnabled -> "ARMED/IDLE"
+                            else -> "SECURED"
+                        },
+                        fontSize = 9.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = coreColor,
+                        fontFamily = FontFamily.Monospace
+                    )
+                }
             }
 
-            // 4. Center Glowing Orb
-            Box(
+            // PRIMARY CORE + EQUALIZER ROW
+            Row(
                 modifier = Modifier
-                    .size(56.dp)
-                    .clip(CircleShape)
-                    .background(
-                        Brush.linearGradient(
-                            listOf(
-                                coreColor,
-                                JarvisAccent
+                    .fillMaxWidth()
+                    .padding(vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceEvenly
+            ) {
+                // Left dynamic soundwave bars
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.height(70.dp).weight(1f)
+                ) {
+                    Spacer(modifier = Modifier.weight(1f))
+                    (0..3).forEach { barIndex ->
+                        val barHeight = 50.dp * barAnimations[barIndex].value
+                        Box(
+                            modifier = Modifier
+                                .width(4.dp)
+                                .height(if (handsFreeEnabled) barHeight else 3.dp)
+                                .clip(RoundedCornerShape(2.dp))
+                                .background(
+                                    Brush.verticalGradient(
+                                        colors = listOf(coreColor, coreColor.copy(alpha = 0.3f))
+                                    )
+                                )
+                        )
+                    }
+                }
+
+                // Interactive central reactor button to initiate speech directly
+                Box(
+                    modifier = Modifier
+                        .size(100.dp)
+                        .clip(CircleShape)
+                        .clickable { onStartSpeech() }
+                        .background(
+                            Brush.radialGradient(
+                                colors = listOf(
+                                    coreColor.copy(alpha = 0.15f),
+                                    coreColor.copy(alpha = 0.02f),
+                                    Color.Transparent
+                                )
                             )
                         )
-                    ),
-                contentAlignment = Alignment.Center
+                        .testTag("vocal_core_button"),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Canvas(modifier = Modifier.fillMaxSize()) {
+                        val r = size.minDimension / 2
+                        val center = Offset(size.width / 2, size.height / 2)
+
+                        // 1. Outer radiating pulse wave
+                        drawCircle(
+                            color = coreColor,
+                            radius = r * 0.75f * pulseScale,
+                            style = Stroke(width = 1.5.dp.toPx()),
+                            alpha = 0.18f
+                        )
+
+                        // 2. Spinning outer technical ring
+                        drawArc(
+                            color = coreColor.copy(alpha = 0.45f),
+                            startAngle = rotationAngle,
+                            sweepAngle = 70f,
+                            useCenter = false,
+                            topLeft = Offset(center.x - r * 0.70f, center.y - r * 0.70f),
+                            size = androidx.compose.ui.geometry.Size(r * 1.4f, r * 1.4f),
+                            style = Stroke(width = 2.dp.toPx())
+                        )
+                        
+                        drawArc(
+                            color = coreColor.copy(alpha = 0.45f),
+                            startAngle = rotationAngle + 180f,
+                            sweepAngle = 70f,
+                            useCenter = false,
+                            topLeft = Offset(center.x - r * 0.70f, center.y - r * 0.70f),
+                            size = androidx.compose.ui.geometry.Size(r * 1.4f, r * 1.4f),
+                            style = Stroke(width = 2.dp.toPx())
+                        )
+
+                        // 3. Inner guiding ring
+                        drawCircle(
+                            color = coreColor.copy(alpha = 0.15f),
+                            radius = r * 0.55f,
+                            style = Stroke(width = 1.dp.toPx())
+                        )
+                    }
+
+                    // Center Glowing Orb
+                    Box(
+                        modifier = Modifier
+                            .size(52.dp)
+                            .clip(CircleShape)
+                            .background(
+                                Brush.linearGradient(
+                                    listOf(coreColor, JarvisAccent)
+                                )
+                            ),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = when {
+                                isSpeaking -> Icons.Default.VolumeUp
+                                isThinking -> Icons.Default.Refresh
+                                else -> Icons.Default.Mic
+                            },
+                            contentDescription = "Trigger Manual Voice Input",
+                            tint = JarvisBackground,
+                            modifier = Modifier.size(22.dp)
+                        )
+                    }
+                }
+
+                // Right dynamic soundwave bars
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.height(70.dp).weight(1f)
+                ) {
+                    (4..7).forEach { barIndex ->
+                        val barHeight = 50.dp * barAnimations[barIndex].value
+                        Box(
+                            modifier = Modifier
+                                .width(4.dp)
+                                .height(if (handsFreeEnabled) barHeight else 3.dp)
+                                .clip(RoundedCornerShape(2.dp))
+                                .background(
+                                    Brush.verticalGradient(
+                                        colors = listOf(coreColor, coreColor.copy(alpha = 0.3f))
+                                    )
+                                )
+                        )
+                    }
+                    Spacer(modifier = Modifier.weight(1f))
+                }
+            }
+
+            Spacer(modifier = Modifier.height(6.dp))
+
+            // Subtitle state caption
+            Text(
+                text = when {
+                    isThinking -> "COGNITIVE SYNAPSE ALIGNMENT ACTIVE"
+                    isSpeaking -> "AUDIO FEEDBACK SPEECH GENERATED"
+                    isListening -> "NATIVE DECRYPTOR RECEIVING RAW DATA"
+                    handsFreeEnabled -> "CONTINUOUS ACOUSTIC LISTEN ROUTINES ENGAGED"
+                    else -> "MICROPHONE MODULE INACTIVE (TAP CORE TO QUERY)"
+                },
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold,
+                color = coreColor,
+                fontFamily = FontFamily.Monospace,
+                letterSpacing = 0.5.sp,
+                textAlign = TextAlign.Center
+            )
+
+            Divider(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 14.dp),
+                color = JarvisSurfaceVariant.copy(alpha = 0.4f),
+                thickness = 1.dp
+            )
+
+            // HARDWARE TOGGLE BUTTON GROUP (Microphone Access controls)
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(Color.Black.copy(alpha = 0.3f))
+                    .border(BorderStroke(1.dp, coreColor.copy(alpha = 0.15f)), RoundedCornerShape(16.dp))
+                    .padding(12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                Icon(
-                    imageVector = if (isSpeaking) Icons.Default.VolumeUp else Icons.Default.Mic,
-                    contentDescription = "Speak trigger",
-                    tint = JarvisBackground,
-                    modifier = Modifier.size(24.dp)
-                )
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "CONTINUOUS HANDS-FREE MIC",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = JarvisTextPrimary,
+                        fontFamily = FontFamily.Monospace
+                    )
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        text = if (handsFreeEnabled) "Wake-word detection online. Direct access is hot." else "Mic dormant. Toggle switch to engage wake ears.",
+                        fontSize = 11.sp,
+                        color = JarvisTextSecondary
+                    )
+                }
+
+                // Glowing Tactile Switch or Custom Arming Button
+                Button(
+                    onClick = { onToggleHandsFree() },
+                    modifier = Modifier
+                        .testTag("mic_access_toggle_btn")
+                        .height(38.dp),
+                    shape = RoundedCornerShape(12.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = if (handsFreeEnabled) Color(0xFF00E6FF).copy(alpha = 0.2f) else JarvisSurfaceVariant,
+                        contentColor = if (handsFreeEnabled) Color(0xFF00E6FF) else JarvisTextSecondary
+                    ),
+                    border = BorderStroke(
+                        width = 1.dp,
+                        color = if (handsFreeEnabled) Color(0xFF00E6FF).copy(alpha = 0.5f) else JarvisTextSecondary.copy(alpha = 0.3f)
+                    ),
+                    contentPadding = PaddingValues(horizontal = 14.dp)
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Icon(
+                            imageVector = if (handsFreeEnabled) Icons.Default.Mic else Icons.Default.MicOff,
+                            contentDescription = "Toggle Mic Access",
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Text(
+                            text = if (handsFreeEnabled) "DISENGAGE" else "EMPOWER",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = FontFamily.Monospace,
+                            letterSpacing = 0.5.sp
+                        )
+                    }
+                }
             }
         }
-        Spacer(modifier = Modifier.height(10.dp))
-        Text(
-            text = when {
-                isThinking -> "SYNCHRONIZING SECURE ROUTING"
-                isSpeaking -> "ACTIVE VERBAL FEEDBACK"
-                handsFreeEnabled -> "HANDS-FREE CONTINUOUS WAVEFORM ACTIVE"
-                else -> "JARVIS VOCAL SYSTEM STANDBY"
-            },
-            fontSize = 11.sp,
-            fontWeight = FontWeight.Bold,
-            color = coreColor,
-            fontFamily = FontFamily.Monospace,
-            letterSpacing = 1.2.sp
-        )
     }
 }
 
