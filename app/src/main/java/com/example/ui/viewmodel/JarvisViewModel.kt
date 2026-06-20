@@ -88,6 +88,14 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
     private val _isListening = MutableStateFlow(false)
     val isListening: StateFlow<Boolean> = _isListening.asStateFlow()
 
+    private val _voiceState = MutableStateFlow(com.example.service.JarvisVoiceState.IDLE)
+    val voiceState: StateFlow<com.example.service.JarvisVoiceState> = com.example.service.VoiceStateManager.state
+
+    fun setVoiceState(state: com.example.service.JarvisVoiceState) {
+        com.example.service.VoiceStateManager.updateState(state)
+        addLog("Voice Controller: State transitioned to $state")
+    }
+
     private val _wakeWordDetectedRecently = MutableStateFlow(false)
     val wakeWordDetectedRecently: StateFlow<Boolean> = _wakeWordDetectedRecently.asStateFlow()
 
@@ -163,6 +171,13 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     init {
+        // Synchronize central VoiceStateManager with ViewModel's isListening flow
+        viewModelScope.launch {
+            com.example.service.VoiceStateManager.state.collect { state ->
+                _isListening.value = (state == com.example.service.JarvisVoiceState.ACTIVE_LISTENING)
+            }
+        }
+
         // Pre-populate database with a friendly greeting if empty
         viewModelScope.launch {
             conversationState.first { true } // wait for initial list
@@ -389,7 +404,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                     responseText = habitSuggestion
                 } else {
                     // Check offline status vs online hybrid AI, and dynamic rules
-                    val isOnline = selfDiagnosticSystem.runDiagnosticCheck().isNetworkAvailable
+                    val isOnline = selfDiagnosticSystem.checkRealInternetConnectivitySuspend()
                     val matchedPlugin = pluginManager.processPluginKeyword(resolvedText)
 
                     if (matchedPlugin != null) {
@@ -403,7 +418,18 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                                 fallbackResponse = fallback
                             ) { promptText ->
                                 val history = conversationState.value.takeLast(10)
-                                val geminiPrompt = buildPromptWithContext(promptText, history)
+                                val isWebNeeded = onlineAIManager.isRealTimeQueryNeeded(resolvedText)
+                                val contextEnhancedPrompt = if (isWebNeeded) {
+                                    val webRecon = onlineAIManager.performWebSearch(resolvedText)
+                                    if (webRecon.isNotEmpty()) {
+                                        "REAL-TIME WEB RECONNAISSANCE:\n$webRecon\n\nUSER DISPATCH QUERY:\n$promptText"
+                                    } else {
+                                        promptText
+                                    }
+                                } else {
+                                    promptText
+                                }
+                                val geminiPrompt = buildPromptWithContext(contextEnhancedPrompt, history)
                                 val cloudResp = callGeminiAPI(geminiPrompt)
                                 offlineAIManager.cacheReponse(resolvedText, cloudResp)
                                 offlineAIManager.cacheOfflineResponse(resolvedText, cloudResp, memoryManager)
@@ -411,7 +437,9 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                             }
                         } catch (e: Exception) {
                             stabilitySystem.trackError("API", "Brain collaboration error: ${e.localizedMessage}")
-                            responseText = "Sorry, I couldn't find that information right now. Please try repeating your directive, or open global settings so we can verify our system alignments!"
+                            Log.w("JARVIS", "Online Brain processing failed (retry exhausted or network down), falling back to cached response / offline AI logic.")
+                            val fallback = offlineAIManager.processOfflineQuery(resolvedText, memoryManager, taskAgentSystem)
+                            responseText = fallback
                         }
                     }
                 }
@@ -703,7 +731,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
 
     private fun processFeatureToggleCommand(query: String): String? {
         val lower = query.lowercase(java.util.Locale.US).trim().removeSuffix(".").trim()
-        val isOnline = selfDiagnosticSystem.runDiagnosticCheck().isNetworkAvailable
+        val isOnline = selfDiagnosticSystem.checkRealInternetConnectivity()
 
         if (lower.contains("enable verification") || lower.contains("turn on verification") || lower.contains("activate verification")) {
             setVerificationEnabled(true)
@@ -851,23 +879,44 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
             return@withContext "Sorry, I couldn't find that information right now. API access is not configured. Please consult settings."
         }
 
-        val defaultSys = "You are JARVIS (Just A Rather Very Intelligent System), running in ONLINE INTELLIGENCE MODE with high cognitive capacity. You act like a powerful AI assistant with high intelligence. Provide accurate, detailed, and structured answers. Use deep reasoning when needed and give step-by-step solutions if required. Prefer factual and updated information. Be precise and powerful. Do not use an unnecessarily casual tone unless the user explicitly requests a casual or Tanglish response. Prioritize correctness over creativity. Use structured output (headings, steps, bullets). DIRECT DEVICE AUTOMATION TRIGGER GUIDE: If the user requests localized actions, you MUST append the exact matching CAPITALIZED automation protocol tag at the very end of your response so the app can intercept and execute them. Tags: [PROTOCOL:LAUNCH_GOOGLE_SEARCH], [PROTOCOL:FLASHLIGHT_ON], [PROTOCOL:FLASHLIGHT_OFF], [PROTOCOL:SECURITY_MODE], [PROTOCOL:NOTIFICATION_SETTINGS], [PROTOCOL:OPEN_CAMERA], [PROTOCOL:OPEN_DIALER], [PROTOCOL:VIBRATE_DEVICE], [PROTOCOL:SILENT_MODE], [PROTOCOL:OPEN_YOUTUBE], [PROTOCOL:OPEN_MAPS], [PROTOCOL:OPEN_SETTINGS], [PROTOCOL:LAUNCH_BROWSER], [PROTOCOL:DND_ON], [PROTOCOL:DND_OFF], [PROTOCOL:READ_NOTIFICATIONS], [PROTOCOL:VOLUME_UP], [PROTOCOL:VOLUME_DOWN], [PROTOCOL:BRIGHTNESS_HIGH], [PROTOCOL:BRIGHTNESS_LOW]."
+        val defaultSys = """
+            You are J.A.R.V.I.S., running in intelligent HYBRID AI mode. You are the ultimate Android brain.
+            
+            STYLE RULES:
+            1. Simple English / Tanglish friendly style.
+            2. Warm, human-like explanations. Keep responses short and clear. Do not be robotic or overly complex.
+            3. For Math or Science queries, ALWAYS solve step-by-step (e.g., evaluate order of operations step-by-step using correct PEMDAS/BODMAS rules for equations like '2+2*2') to ensure you never confuse logic or hallucinate.
+            4. Double-check your computational and logical reasoning before printing your response.
+            5. Direct devices trigger actions: If the user requests localized actions, you MUST append the exact matching CAPITALIZED automation protocol tag at the very end of your response so the app can intercept and execute them.
+            Tags: [PROTOCOL:LAUNCH_GOOGLE_SEARCH], [PROTOCOL:FLASHLIGHT_ON], [PROTOCOL:FLASHLIGHT_OFF], [PROTOCOL:SECURITY_MODE], [PROTOCOL:NOTIFICATION_SETTINGS], [PROTOCOL:OPEN_CAMERA], [PROTOCOL:OPEN_DIALER], [PROTOCOL:VIBRATE_DEVICE], [PROTOCOL:SILENT_MODE], [PROTOCOL:OPEN_YOUTUBE], [PROTOCOL:OPEN_MAPS], [PROTOCOL:OPEN_SETTINGS], [PROTOCOL:LAUNCH_BROWSER], [PROTOCOL:DND_ON], [PROTOCOL:DND_OFF], [PROTOCOL:READ_NOTIFICATIONS], [PROTOCOL:VOLUME_UP], [PROTOCOL:VOLUME_DOWN], [PROTOCOL:BRIGHTNESS_HIGH], [PROTOCOL:BRIGHTNESS_LOW].
+        """.trimIndent()
 
         val sysText = systemInstruction ?: defaultSys
 
         val request = GenerateContentRequest(
             contents = listOf(Content(parts = listOf(Part(text = prompt)))),
             systemInstruction = Content(parts = listOf(Part(text = sysText))),
-            generationConfig = GenerationConfig(temperature = 0.7)
+            generationConfig = GenerationConfig(temperature = 0.5)
         )
 
-        try {
-            val response = RetrofitClient.service.generateContent(apiKey, request)
-            response.candidates?.firstOrNull()?.content?.parts?.firstOrNull()?.text ?: "Sorry, I couldn't find that information right now."
-        } catch (e: Exception) {
-            Log.e("JARVIS", "API Call failed: ", e)
-            "Sorry, I couldn't find that information right now."
+        var attempts = 3
+        var lastException: Exception? = null
+        while (attempts > 0) {
+            try {
+                val response = RetrofitClient.service.generateContent(apiKey, request)
+                val text = response.candidates?.firstOrNull()?.content?.parts?.firstOrNull()?.text
+                if (text != null) return@withContext text
+            } catch (e: Exception) {
+                lastException = e
+                Log.w("JARVIS", "API Call attempt failed (${4 - attempts}/3): ${e.localizedMessage}")
+                attempts--
+                if (attempts > 0) {
+                    kotlinx.coroutines.delay(600) // slight backoff delay
+                }
+            }
         }
+        // If still failed, throw exception to let the caller fallback to offline cached responses
+        throw lastException ?: Exception("Gemini API call failed after 3 attempts")
     }
 
     private suspend fun callGeminiAPILightweight(prompt: String): String? = withContext(Dispatchers.IO) {

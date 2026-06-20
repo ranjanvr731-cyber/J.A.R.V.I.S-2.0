@@ -18,9 +18,65 @@ class SelfDiagnosticSystem(private val context: Context) {
         val batteryDrainRate: String
     )
 
+    private var cachedRealInternetAvailable = false
+    private var lastCheckTime = 0L
+
+    fun checkRealInternetConnectivity(): Boolean {
+        if (!checkInternetConnectivity()) return false
+        val now = System.currentTimeMillis()
+        if (now - lastCheckTime > 4000) {
+            lastCheckTime = now
+            // Run on background thread safely to avoid blocking caller thread if it is Main
+            try {
+                val thread = Thread {
+                    cachedRealInternetAvailable = try {
+                        val url = java.net.URL("https://www.google.com")
+                        val connection = url.openConnection() as java.net.HttpURLConnection
+                        connection.connectTimeout = 1200
+                        connection.readTimeout = 1200
+                        connection.requestMethod = "GET"
+                        val responseCode = connection.responseCode
+                        responseCode == 200
+                    } catch (e: Exception) {
+                        false
+                    }
+                }
+                thread.start()
+                thread.join(1500) // maximum wait budget of 1.5 seconds
+            } catch (e: Exception) {
+                cachedRealInternetAvailable = false
+            }
+        }
+        return cachedRealInternetAvailable
+    }
+
+    suspend fun checkRealInternetConnectivitySuspend(): Boolean = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+        val hasSys = checkInternetConnectivity()
+        if (!hasSys) {
+            cachedRealInternetAvailable = false
+            return@withContext false
+        }
+        val result = try {
+            val url = java.net.URL("https://www.google.com")
+            val connection = url.openConnection() as java.net.HttpURLConnection
+            connection.connectTimeout = 1500
+            connection.readTimeout = 1500
+            connection.requestMethod = "GET"
+            val responseCode = connection.responseCode
+            responseCode == 200
+        } catch (e: Exception) {
+            Log.w(TAG, "Real internet ping test failed: ${e.localizedMessage}")
+            false
+        }
+        cachedRealInternetAvailable = result
+        lastCheckTime = System.currentTimeMillis()
+        result
+    }
+
     fun runDiagnosticCheck(): HealthStatus {
         val hasMicrophone = context.checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) == android.content.pm.PackageManager.PERMISSION_GRANTED
-        val hasInternet = checkInternetConnectivity()
+        // ALWAYS verify using the robust real network flow check
+        val hasInternet = checkRealInternetConnectivity()
         val apiKey = com.example.data.network.GoogleApiKeyProvider.getApiKey()
         val hasApiKey = apiKey.isNotBlank() && apiKey != "MY_GEMINI_API_KEY"
 
